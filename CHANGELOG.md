@@ -8,8 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Location on expenses 📍** — an opt-in "Add current location" button in the add/edit sheet captures GPS (offline) and, when online, reverse-geocodes it to a readable place name via the free Nominatim API. Expenses show a 📍 place chip that opens the spot in OpenStreetMap/Maps. New `core.js` helpers `geoMapUrl` + extended `normalizeExpense` (validated `lat`/`lng`/`place`), unit-tested.
-- **Photos 📷** — attach a food/receipt photo per expense. Images are downscaled (canvas → ~1280px JPEG) and stored in **IndexedDB** (`js/photos.js`), so they never bloat `localStorage`, JSON, or QR transfers; the expense keeps only a `photoId`. Rows show a thumbnail (tap for a full-screen viewer); orphaned photos are purged on boot.
+- **Location on expenses 📍** — available in both the quick-add panel (under "More options") and the full sheet. Choose **current location** (offline GPS) or **search for a place** by name (Nominatim); a current-location capture also reverse-geocodes to a readable place name when online. Expenses show a 📍 place chip that opens the spot in OpenStreetMap/Maps. New `core.js` helpers `geoMapUrl` + extended `normalizeExpense` (validated `lat`/`lng`/`place`), unit-tested.
+- **Photos 📷** — attach a food/receipt photo per expense from quick-add or the sheet, via **Camera** or **Library**. Images are downscaled (canvas → ~1280px JPEG) and stored in **IndexedDB** (`js/photos.js`), so they never bloat `localStorage`, JSON, or QR transfers; the expense keeps only a `photoId`. Rows show a thumbnail (tap for a full-screen viewer); orphaned photos are purged on boot.
+- Location + photo controls are a single shared, context-aware component reused by quick-add and the sheet.
 - **Excel export 📊** — a `⬇️ Excel` button produces a real multi-sheet `.xlsx` (Summary, Expenses, By category, By day) with bold headers and numeric/currency cells, via a dependency-free writer (`js/xlsx.js`, ~150 lines: stored-ZIP + OOXML). Verified by reading the output back with SheetJS and structural unit tests. `workbookSheets` (the sheet-data builder) lives in `core.js` and is tested.
 - Service worker precaches the new modules; cache bumped to `triptally-v11`.
 

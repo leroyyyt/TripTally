@@ -391,6 +391,8 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
           <input class="input qa-date" id="qaDate" type="date" aria-label="Date">
         </div>
         <input class="input qa-item" id="qaItem" placeholder="What did you spend on?" aria-label="Item name">
+        <button class="more-toggle" id="qaMore" aria-expanded="false" style="margin-top:8px">📍📷 Add location / photo ⌄</button>
+        <div class="advanced" id="qaAdvBox"><div id="qa_io" class="io-block"></div></div>
         <button class="btn btn-primary btn-block qa-add" id="qaAdd" style="margin-top:9px">＋ Add expense</button>
       </div>
       <div id="dashboardBody" class="stagger"></div>
@@ -586,21 +588,7 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
     </div>
     <div class="field"><label>Note (optional)</label>
       <input class="input" id="fNote" placeholder="Add a little detail…" maxlength="120"></div>
-    <div class="field"><label>Location (optional)</label>
-      <div class="io-row">
-        <button type="button" class="btn btn-soft" id="btnGeo" style="flex:1">📍 Add current location</button>
-        <button type="button" class="mini" id="btnGeoClear" style="display:none" aria-label="Clear location">✕</button>
-      </div>
-      <div class="footer-note" id="geoLabel" style="margin-top:6px"></div>
-    </div>
-    <div class="field"><label>Photo (optional)</label>
-      <input type="file" id="fPhoto" accept="image/*" capture="environment" style="display:none">
-      <div class="io-row">
-        <button type="button" class="btn btn-soft" id="btnPhoto" style="flex:1">📷 Add photo</button>
-        <button type="button" class="mini" id="btnPhotoClear" style="display:none" aria-label="Remove photo">✕</button>
-      </div>
-      <img id="photoPreview" alt="" style="display:none;margin-top:8px;max-width:100%;max-height:220px;border-radius:10px;object-fit:cover">
-    </div>
+    <div id="sh_io" class="io-block"></div>
   </div>
 
   <div class="sheet-err" id="sheetErr"></div>
@@ -1296,32 +1284,92 @@ function buildCategoryGrid(containerId, current, onPick){
   });
 }
 
-/* ---------- sheet: location + photo state ---------- */
-let sheetLat = null, sheetLng = null, sheetPlace = "";
-let sheetPhotoBlob = null, sheetPhotoId = null, sheetPhotoCleared = false;
+/* ============================================================
+   LOCATION + PHOTO controls — shared by the sheet ("sh") and the
+   quick-add panel ("qa"). State lives in io[ctx]; DOM ids are
+   `${ctx}_role` (injected by ioMarkup at init).
+   ============================================================ */
+const io = {
+  sh: { lat:null, lng:null, place:"", blob:null, photoId:null, cleared:false },
+  qa: { lat:null, lng:null, place:"", blob:null, photoId:null, cleared:false }
+};
+const ioEl = (ctx, role) => $(ctx + "_" + role);
 
-function updateGeoUI(){
-  const has = sheetLat != null && sheetLng != null;
-  $("geoLabel").textContent = has ? ("📍 " + (sheetPlace || (sheetLat.toFixed(4) + ", " + sheetLng.toFixed(4)))) : "";
-  $("btnGeoClear").style.display = has ? "" : "none";
-  $("btnGeo").textContent = has ? "📍 Update location" : "📍 Add current location";
+function ioMarkup(ctx){
+  return `
+    <div class="io-label">📍 Location <span class="io-opt">optional</span></div>
+    <div class="io-row">
+      <button type="button" class="btn btn-soft" id="${ctx}_geoCur" style="flex:1">📍 Current</button>
+      <button type="button" class="btn btn-soft" id="${ctx}_geoFind" style="flex:1">🔎 Search</button>
+      <button type="button" class="mini" id="${ctx}_geoClear" style="display:none" aria-label="Clear location">✕</button>
+    </div>
+    <div id="${ctx}_geoBox" class="geo-box" style="display:none">
+      <input class="input" id="${ctx}_geoQ" placeholder="Search a place…" aria-label="Search a place">
+      <div id="${ctx}_geoRes" class="geo-res"></div>
+    </div>
+    <div class="footer-note" id="${ctx}_geoLabel" style="margin:4px 0 0"></div>
+    <div class="io-label" style="margin-top:12px">📷 Photo <span class="io-opt">optional</span></div>
+    <input type="file" id="${ctx}_camIn" accept="image/*" capture="environment" style="display:none">
+    <input type="file" id="${ctx}_libIn" accept="image/*" style="display:none">
+    <div class="io-row">
+      <button type="button" class="btn btn-soft" id="${ctx}_cam" style="flex:1">📷 Camera</button>
+      <button type="button" class="btn btn-soft" id="${ctx}_lib" style="flex:1">🖼️ Library</button>
+      <button type="button" class="mini" id="${ctx}_photoClear" style="display:none" aria-label="Remove photo">✕</button>
+    </div>
+    <img id="${ctx}_preview" alt="" class="io-preview" style="display:none">`;
 }
-function captureLocation(){
+
+function renderGeo(ctx){
+  const s = io[ctx], has = s.lat != null && s.lng != null;
+  ioEl(ctx,"geoLabel").textContent = has ? ("📍 " + (s.place || (s.lat.toFixed(4) + ", " + s.lng.toFixed(4)))) : "";
+  ioEl(ctx,"geoClear").style.display = has ? "" : "none";
+}
+function setGeo(ctx, lat, lng, place){
+  io[ctx].lat = Math.round(Number(lat) * 1e6) / 1e6;
+  io[ctx].lng = Math.round(Number(lng) * 1e6) / 1e6;
+  io[ctx].place = place || "";
+  renderGeo(ctx);
+}
+function clearGeo(ctx){ io[ctx].lat = null; io[ctx].lng = null; io[ctx].place = ""; ioEl(ctx,"geoBox").style.display = "none"; renderGeo(ctx); }
+function geoCurrent(ctx){
   if(!navigator.geolocation){ toast("Location isn't available here"); return; }
-  $("btnGeo").textContent = "Locating…"; $("btnGeo").disabled = true;
+  const btn = ioEl(ctx,"geoCur"); btn.disabled = true; btn.textContent = "…";
   navigator.geolocation.getCurrentPosition(async (pos) => {
-    sheetLat = Math.round(pos.coords.latitude * 1e6) / 1e6;
-    sheetLng = Math.round(pos.coords.longitude * 1e6) / 1e6;
-    sheetPlace = ""; updateGeoUI(); haptic();
-    $("btnGeo").disabled = false;
-    if(navigator.onLine){
-      const name = await reverseGeocode(sheetLat, sheetLng);
-      if(name){ sheetPlace = name; updateGeoUI(); }
-    }
+    setGeo(ctx, pos.coords.latitude, pos.coords.longitude, ""); haptic();
+    btn.disabled = false; btn.textContent = "📍 Current";
+    if(navigator.onLine){ const name = await reverseGeocode(io[ctx].lat, io[ctx].lng); if(name){ io[ctx].place = name; renderGeo(ctx); } }
   }, (err) => {
-    $("btnGeo").disabled = false; updateGeoUI();
+    btn.disabled = false; btn.textContent = "📍 Current";
     toast(err && err.code === 1 ? "Location permission denied" : "Couldn't get your location");
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+}
+function toggleGeoSearch(ctx){
+  const box = ioEl(ctx,"geoBox");
+  const open = box.style.display === "none";
+  box.style.display = open ? "block" : "none";
+  if(open) ioEl(ctx,"geoQ").focus();
+}
+async function runGeoSearch(ctx){
+  const q = ioEl(ctx,"geoQ").value.trim();
+  const res = ioEl(ctx,"geoRes");
+  if(!q){ res.innerHTML = ""; return; }
+  if(!navigator.onLine){ toast("Place search needs a connection"); return; }
+  res.innerHTML = `<div class="footer-note">Searching…</div>`;
+  try{
+    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(q)}`;
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    const data = await r.json();
+    if(!Array.isArray(data) || !data.length){ res.innerHTML = `<div class="footer-note">No places found</div>`; return; }
+    res._results = data;
+    res.innerHTML = data.map((d, i) => `<button type="button" class="geo-item" data-i="${i}">${esc(d.display_name)}</button>`).join("");
+  }catch(e){ console.warn("geo search", e); res.innerHTML = `<div class="footer-note">Search failed</div>`; }
+}
+function pickGeoResult(ctx, idx){
+  const res = ioEl(ctx,"geoRes"), d = res._results && res._results[idx];
+  if(!d) return;
+  const name = (d.display_name || "").split(",").slice(0, 2).join(",").trim().slice(0, 80);
+  setGeo(ctx, d.lat, d.lon, name);
+  ioEl(ctx,"geoBox").style.display = "none";
 }
 async function reverseGeocode(lat, lng){
   try{
@@ -1337,26 +1385,54 @@ async function reverseGeocode(lat, lng){
     return (label || "").slice(0, 80);
   }catch{ return ""; }
 }
-function clearLocation(){ sheetLat = null; sheetLng = null; sheetPlace = ""; updateGeoUI(); }
-
-function updatePhotoUI(){
-  const img = $("photoPreview");
-  if(sheetPhotoBlob){ img.src = URL.createObjectURL(sheetPhotoBlob); img.style.display = "block"; }
-  else if(sheetPhotoId && !sheetPhotoCleared){
-    loadPhoto(sheetPhotoId).then(b => { if(b){ img.src = URL.createObjectURL(b); img.style.display = "block"; } else img.style.display = "none"; });
+function renderPhoto(ctx){
+  const s = io[ctx], img = ioEl(ctx,"preview");
+  if(s.blob){ img.src = URL.createObjectURL(s.blob); img.style.display = "block"; }
+  else if(s.photoId && !s.cleared){
+    loadPhoto(s.photoId).then(b => { if(b){ img.src = URL.createObjectURL(b); img.style.display = "block"; } else img.style.display = "none"; });
   } else { img.removeAttribute("src"); img.style.display = "none"; }
-  const has = !!sheetPhotoBlob || (sheetPhotoId && !sheetPhotoCleared);
-  $("btnPhotoClear").style.display = has ? "" : "none";
-  $("btnPhoto").textContent = has ? "📷 Change photo" : "📷 Add photo";
+  ioEl(ctx,"photoClear").style.display = (s.blob || (s.photoId && !s.cleared)) ? "" : "none";
 }
-async function onPhotoPicked(file){
+async function ioPhotoPicked(ctx, file){
   if(!file) return;
-  $("btnPhoto").textContent = "Processing…"; $("btnPhoto").disabled = true;
-  try{ sheetPhotoBlob = await downscaleImage(file); sheetPhotoCleared = false; updatePhotoUI(); }
+  try{ io[ctx].blob = await downscaleImage(file); io[ctx].cleared = false; renderPhoto(ctx); haptic(); }
   catch(e){ console.warn("photo", e); toast("Couldn't process that image"); }
-  finally{ $("btnPhoto").disabled = false; updatePhotoUI(); }
 }
-function clearPhotoFromSheet(){ sheetPhotoBlob = null; sheetPhotoCleared = true; updatePhotoUI(); }
+function clearPhoto(ctx){ io[ctx].blob = null; io[ctx].cleared = true; renderPhoto(ctx); }
+function resetIO(ctx, expense){
+  io[ctx] = {
+    lat: (expense && expense.lat != null) ? expense.lat : null,
+    lng: (expense && expense.lng != null) ? expense.lng : null,
+    place: (expense && expense.place) || "",
+    blob: null, photoId: (expense && expense.photoId) || null, cleared: false
+  };
+  const box = ioEl(ctx,"geoBox");
+  if(box){ box.style.display = "none"; ioEl(ctx,"geoRes").innerHTML = ""; ioEl(ctx,"geoQ").value = ""; }
+  renderGeo(ctx); renderPhoto(ctx);
+}
+async function applyIO(ctx, target){
+  const s = io[ctx];
+  if(s.lat != null && s.lng != null){ target.lat = s.lat; target.lng = s.lng; if(s.place) target.place = s.place; else delete target.place; }
+  else { delete target.lat; delete target.lng; delete target.place; }
+  if(s.blob){
+    const pid = target.photoId || (uid() + "img");
+    try{ await savePhoto(pid, s.blob); target.photoId = pid; }
+    catch(e){ console.warn("photo save", e); toast("Couldn't save the photo"); }
+  } else if(s.cleared && target.photoId){ deletePhoto(target.photoId); delete target.photoId; }
+}
+function wireIO(ctx){
+  $(ctx + "_io").innerHTML = ioMarkup(ctx);
+  ioEl(ctx,"geoCur").addEventListener("click", () => geoCurrent(ctx));
+  ioEl(ctx,"geoFind").addEventListener("click", () => toggleGeoSearch(ctx));
+  ioEl(ctx,"geoClear").addEventListener("click", () => clearGeo(ctx));
+  ioEl(ctx,"geoQ").addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); runGeoSearch(ctx); } });
+  ioEl(ctx,"geoRes").addEventListener("click", e => { const b = e.target.closest("[data-i]"); if(b) pickGeoResult(ctx, +b.dataset.i); });
+  ioEl(ctx,"cam").addEventListener("click", () => ioEl(ctx,"camIn").click());
+  ioEl(ctx,"lib").addEventListener("click", () => ioEl(ctx,"libIn").click());
+  ioEl(ctx,"camIn").addEventListener("change", e => { ioPhotoPicked(ctx, e.target.files[0]); e.target.value = ""; });
+  ioEl(ctx,"libIn").addEventListener("change", e => { ioPhotoPicked(ctx, e.target.files[0]); e.target.value = ""; });
+  ioEl(ctx,"photoClear").addEventListener("click", () => clearPhoto(ctx));
+}
 
 function openPhotoViewer(pid){
   if(!pid) return;
@@ -1379,12 +1455,7 @@ function openSheet(expense){
   _lastTrigger = document.activeElement;
   editingId = expense ? expense.id : null;
   $("sheetTitle").textContent = expense ? "Edit expense" : "Add expense";
-  sheetLat = (expense && expense.lat != null) ? expense.lat : null;
-  sheetLng = (expense && expense.lng != null) ? expense.lng : null;
-  sheetPlace = (expense && expense.place) || "";
-  sheetPhotoId = (expense && expense.photoId) || null;
-  sheetPhotoBlob = null; sheetPhotoCleared = false;
-  updateGeoUI(); updatePhotoUI();
+  resetIO("sh", expense);
   $("sheetSave").textContent = expense ? "Save changes" : "Save expense";
   $("sheetErr").classList.remove("show");
   $("amountWrap").classList.remove("err");
@@ -1435,21 +1506,7 @@ async function saveFromSheet(){
     target = { id:uid(), item, amount:Math.round(amount*100)/100, currency:cur, category:sheetCat, date, note, createdAt:Date.now() };
     state.expenses.push(target);
   }
-  if(target){
-    // location
-    if(sheetLat != null && sheetLng != null){
-      target.lat = sheetLat; target.lng = sheetLng;
-      if(sheetPlace) target.place = sheetPlace; else delete target.place;
-    } else { delete target.lat; delete target.lng; delete target.place; }
-    // photo (binary -> IndexedDB; only the id stays in state)
-    if(sheetPhotoBlob){
-      const pid = target.photoId || (uid() + "img");
-      try{ await savePhoto(pid, sheetPhotoBlob); target.photoId = pid; }
-      catch(e){ console.warn("photo save", e); toast("Couldn't save the photo"); }
-    } else if(sheetPhotoCleared && target.photoId){
-      deletePhoto(target.photoId); delete target.photoId;
-    }
-  }
+  if(target) await applyIO("sh", target);
   state.settings.lastCategory = sheetCat;
   haptic();
   closeSheet();
@@ -1463,17 +1520,22 @@ async function saveFromSheet(){
 let quickCat = state.settings.lastCategory || "food";
 // Default date for quick add: the first day of the trip (falls back to today).
 function quickDateDefault(){ return isValidDate(state.trip.startDate) ? state.trip.startDate : todayStr(); }
-function quickAdd(){
+async function quickAdd(){
   const amount = parseAmount($("qaAmount").value);
   const item = $("qaItem").value.trim();
   let date = $("qaDate").value;
   if(!isValidDate(date)) date = quickDateDefault();
   if(!item){ shake($("qaItem")); $("qaItem").focus(); toast("✏️ Add an item name"); return; }
   if(!(amount>0)){ shake($("qaAmount")); $("qaAmount").focus(); toast("💵 Amount must be positive"); return; }
-  state.expenses.push({
+  const exp = {
     id:uid(), item, amount:Math.round(amount*100)/100,
     currency:state.trip.currency||"USD", category:quickCat, date, note:"", createdAt:Date.now()
-  });
+  };
+  state.expenses.push(exp);
+  await applyIO("qa", exp);          // fold in any quick-add location/photo
+  resetIO("qa");
+  $("qaMore").setAttribute("aria-expanded", "false");
+  $("qaAdvBox").classList.remove("show");
   state.settings.lastCategory = quickCat;
   $("qaAmount").value=""; $("qaItem").value="";
   $("qaDate").value = date;              // stays on the date you used (no reset to today)
@@ -1942,11 +2004,15 @@ function init(){
   $("moreToggle").addEventListener("click", ()=> $("advanced").classList.toggle("show"));
   $("fCurrency").addEventListener("change", ()=> $("curTag").textContent=$("fCurrency").value);
   $("fItem").addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); $("fAmount").focus(); }});
-  $("btnGeo").addEventListener("click", captureLocation);
-  $("btnGeoClear").addEventListener("click", clearLocation);
-  $("btnPhoto").addEventListener("click", ()=> $("fPhoto").click());
-  $("btnPhotoClear").addEventListener("click", clearPhotoFromSheet);
-  $("fPhoto").addEventListener("change", e=>{ onPhotoPicked(e.target.files[0]); e.target.value=""; });
+
+  // location + photo controls (shared, injected) for the sheet and quick-add
+  wireIO("sh");
+  wireIO("qa");
+  resetIO("qa");
+  $("qaMore").addEventListener("click", ()=>{
+    const open = $("qaAdvBox").classList.toggle("show");
+    $("qaMore").setAttribute("aria-expanded", open ? "true" : "false");
+  });
 
   // quick add
   $("qaDate").value = isValidDate(state.settings.lastDate) ? state.settings.lastDate : quickDateDefault();
@@ -2133,6 +2199,14 @@ _st.textContent = `
 #photoViewer{position:fixed;inset:0;z-index:120;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.88);padding:20px;cursor:zoom-out}
 #photoViewer.open{display:flex}
 #photoViewer img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.6)}
+.io-block{margin-top:4px}
+.io-label{font-size:12.5px;font-weight:700;color:var(--muted);margin-bottom:6px}
+.io-label .io-opt{font-weight:500;opacity:.7}
+.geo-box{margin-top:8px}
+.geo-res{display:flex;flex-direction:column;gap:4px;margin-top:6px;max-height:180px;overflow:auto}
+.geo-res .geo-item{text-align:left;background:var(--card-2);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:12.5px;color:var(--ink);cursor:pointer;line-height:1.35}
+.geo-res .geo-item:hover{border-color:var(--brand)}
+.io-preview{margin-top:8px;max-width:100%;max-height:220px;border-radius:10px;object-fit:cover;display:block}
 `;
 document.head.appendChild(_st);
 
