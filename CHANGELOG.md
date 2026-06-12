@@ -5,6 +5,14 @@ All notable changes to TripTally are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Location on expenses 📍** — an opt-in "Add current location" button in the add/edit sheet captures GPS (offline) and, when online, reverse-geocodes it to a readable place name via the free Nominatim API. Expenses show a 📍 place chip that opens the spot in OpenStreetMap/Maps. New `core.js` helpers `geoMapUrl` + extended `normalizeExpense` (validated `lat`/`lng`/`place`), unit-tested.
+- **Photos 📷** — attach a food/receipt photo per expense. Images are downscaled (canvas → ~1280px JPEG) and stored in **IndexedDB** (`js/photos.js`), so they never bloat `localStorage`, JSON, or QR transfers; the expense keeps only a `photoId`. Rows show a thumbnail (tap for a full-screen viewer); orphaned photos are purged on boot.
+- **Excel export 📊** — a `⬇️ Excel` button produces a real multi-sheet `.xlsx` (Summary, Expenses, By category, By day) with bold headers and numeric/currency cells, via a dependency-free writer (`js/xlsx.js`, ~150 lines: stored-ZIP + OOXML). Verified by reading the output back with SheetJS and structural unit tests. `workbookSheets` (the sheet-data builder) lives in `core.js` and is tested.
+- Service worker precaches the new modules; cache bumped to `triptally-v11`.
+
 ## [1.0.0] — 2026-06-13
 
 The first stable release. Everything below landed across Phases 0–9: a real installable

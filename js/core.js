@@ -89,12 +89,26 @@ export function normalizeExpense(raw){
   if(!isValidDate(date)) date = todayStr();
   const cat = CAT_MAP[raw.category] ? raw.category : "others";
   const currency = (raw.currency||"USD").toString().toUpperCase().slice(0,6) || "USD";
-  return {
+  const out = {
     id: raw.id || uid(),
     item, amount: Math.round(amount*100)/100, currency, category:cat, date,
     note: (raw.note||"").toString().trim(),
     createdAt: Number(raw.createdAt) || Date.now()
   };
+  // optional geotag
+  const lat = Number(raw.lat), lng = Number(raw.lng);
+  if(isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180){ out.lat = lat; out.lng = lng; }
+  const place = (raw.place||"").toString().trim().slice(0,80);
+  if(place) out.place = place;
+  // optional photo (binary lives in IndexedDB; only the id rides in state)
+  if(raw.photoId) out.photoId = String(raw.photoId).slice(0,60);
+  return out;
+}
+
+// Link that opens a coordinate in OpenStreetMap (and most native map apps).
+export function geoMapUrl(lat, lng){
+  if(!isFinite(Number(lat)) || !isFinite(Number(lng))) return "";
+  return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=17/${lat}/${lng}`;
 }
 
 /* ---------- stats ---------- */
@@ -357,6 +371,49 @@ export function toCSV(expenses){
   const rows = (Array.isArray(expenses) ? expenses : []).map(e =>
     [e.date, e.item, e.category, e.amount, e.currency, e.note || ""].map(cell).join(","));
   return "﻿" + [headers.join(","), ...rows].join("\r\n");
+}
+
+// Build the sheet data for an .xlsx export (pure; js/xlsx.js turns it into a file).
+// Returns [{ name, rows: [[cell, ...]] }] where cells are strings/numbers.
+export function workbookSheets(trip, stats){
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const catLabel = k => (CAT_MAP[k] || {}).label || k;
+
+  const summary = [
+    ["TripTally export"],
+    ["Trip", trip.name || "My Trip"],
+    ["Destination", trip.destination || ""],
+    ["Dates", (trip.startDate || "?") + " to " + (trip.endDate || "?")],
+    ["Currency", trip.currency],
+    ["Budget", typeof trip.budget === "number" ? trip.budget : ""],
+    ["Total spent" + (stats.approx ? " (approx)" : ""), r2(stats.baseTotal)],
+    ["Expenses", stats.count],
+    [],
+    ["Category", "Amount", "% of total"]
+  ];
+  for(const c of stats.cats) summary.push([c.label, r2(c.amount), Math.round(c.pct)]);
+
+  const expenses = [["Date", "Item", "Category", "Amount", "Currency", "Note", "Place", "Photo", "Lat", "Lng"]];
+  for(const e of trip.expenses){
+    expenses.push([
+      e.date, e.item, catLabel(e.category), r2(e.amount), e.currency,
+      e.note || "", e.place || "", e.photoId ? "yes" : "",
+      (e.lat != null ? e.lat : ""), (e.lng != null ? e.lng : "")
+    ]);
+  }
+
+  const byCat = [["Category", "Amount", "% of total", "Budget", "Status"]];
+  for(const c of stats.cats) byCat.push([c.label, r2(c.amount), Math.round(c.pct), c.catBudget != null ? c.catBudget : "", c.catLevel || ""]);
+
+  const byDay = [["Date", "Amount"]];
+  for(const d of stats.days) byDay.push([d.date, r2(d.amount)]);
+
+  return [
+    { name: "Summary", rows: summary },
+    { name: "Expenses", rows: expenses },
+    { name: "By category", rows: byCat },
+    { name: "By day", rows: byDay }
+  ];
 }
 
 // Safe arithmetic for the amount field ("12+8.5", "2*3"). NO eval:

@@ -29,6 +29,8 @@ TripTally helps you log what you spend on a trip — meals, taxis, hotels, ticke
 - **Breakdowns** — totals by category and by day, sorted and percentage-weighted.
 - **24 currencies with optional conversion** — log expenses in any currency; set a per-trip exchange rate (manually or via the free Frankfurter API when online) to fold them into your trip total with an "≈".
 - **Fast entry & lists** — search, day-grouped totals, swipe-to-delete, one-tap repeat, and arithmetic in the amount field (`12+8.5`).
+- **Location & photos** — optionally geotag an expense (with a place name) and attach a food/receipt photo; tap the 📍 chip for a map or the thumbnail for a full view.
+- **Excel export** — download a formatted multi-sheet `.xlsx` (Summary, Expenses, By category, By day) in addition to JSON/CSV.
 - **Budgets & pace** — overall and per-category budgets, plus a mid-trip pace card with a projected end total.
 - **Share summary** — copy a clean text summary of the whole trip to share anywhere.
 - **Backup & restore** — export/import JSON (with duplicate detection) or export a CSV for Excel.
@@ -72,7 +74,9 @@ TripTally is built so that your spending data never leaves your device:
 
 - All trip and expense data is kept in `localStorage` under the key `triptally.v2` (an older `triptally.v1` key is preserved as a one-time migration backup).
 - There is no backend, no analytics, and no third-party scripts loaded at runtime.
-- The only way data leaves your device is if **you** explicitly export it (JSON) or share the text summary.
+- **Location** is opt-in per expense. GPS capture happens on-device; the only network call is the optional reverse-geocode (coordinates → place name) via the free Nominatim API, and only when you tap to add a location while online.
+- **Photos** are downscaled and stored in your browser's IndexedDB on this device only — they are never included in JSON/QR exports and never uploaded.
+- The only way data leaves your device is if **you** explicitly export it (JSON/CSV/Excel) or share the text summary.
 
 Clearing your browser data for this site will erase your trip, so keep backups (below).
 

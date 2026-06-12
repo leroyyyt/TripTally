@@ -23,7 +23,9 @@ import {
   setLocale,
   LOCALES,
   chunkPayload,
-  reassemble
+  reassemble,
+  geoMapUrl,
+  workbookSheets
 } from "../js/core.js";
 
 const todayStr = () => {
@@ -520,6 +522,55 @@ describe("chunkPayload / reassemble (Phase 8)", () => {
   it("preserves base64 chars", () => {
     const b64 = "SGVsbG8r/Pz8=";
     expect(reassemble(chunkPayload(b64, 4))).toBe(b64);
+  });
+});
+
+describe("normalizeExpense location + photo (new)", () => {
+  it("keeps valid coordinates and a place label", () => {
+    const e = normalizeExpense({ item:"x", amount:5, lat:35.66, lng:139.7, place:"Shibuya, Tokyo" });
+    expect(e.lat).toBe(35.66);
+    expect(e.lng).toBe(139.7);
+    expect(e.place).toBe("Shibuya, Tokyo");
+  });
+  it("drops out-of-range or non-numeric coordinates", () => {
+    expect(normalizeExpense({ item:"x", amount:5, lat:200, lng:10 }).lat).toBeUndefined();
+    expect(normalizeExpense({ item:"x", amount:5, lat:"abc", lng:"def" }).lat).toBeUndefined();
+  });
+  it("carries a photoId when present, omits otherwise", () => {
+    expect(normalizeExpense({ item:"x", amount:5, photoId:"p123" }).photoId).toBe("p123");
+    expect(normalizeExpense({ item:"x", amount:5 }).photoId).toBeUndefined();
+  });
+});
+
+describe("geoMapUrl", () => {
+  it("builds an OpenStreetMap link", () => {
+    expect(geoMapUrl(35.66, 139.7)).toContain("openstreetmap.org");
+    expect(geoMapUrl(35.66, 139.7)).toContain("mlat=35.66");
+  });
+  it("returns empty for bad input", () => {
+    expect(geoMapUrl(NaN, 1)).toBe("");
+    expect(geoMapUrl("x", "y")).toBe("");
+  });
+});
+
+describe("workbookSheets (Excel data)", () => {
+  const t = newTrip({ name:"Japan", currency:"USD", budget:1000,
+    expenses:[{ id:"a", item:"Lunch", amount:12.5, currency:"USD", category:"food", date:"2026-03-01", place:"Shibuya", photoId:"p1" }] });
+  const s = computeStats(t, t.expenses);
+  const sheets = workbookSheets(t, s);
+  it("produces the four named sheets", () => {
+    expect(sheets.map(x => x.name)).toEqual(["Summary", "Expenses", "By category", "By day"]);
+  });
+  it("Expenses sheet has the header + a data row with place/photo", () => {
+    const ex = sheets.find(x => x.name === "Expenses").rows;
+    expect(ex[0]).toContain("Place");
+    expect(ex[1]).toContain("Shibuya");
+    expect(ex[1]).toContain("yes"); // photo flag
+    expect(ex[1][3]).toBe(12.5);    // amount stays numeric
+  });
+  it("Summary carries a numeric total", () => {
+    const total = sheets[0].rows.find(r => String(r[0]).startsWith("Total spent"));
+    expect(total[1]).toBe(12.5);
   });
 });
 

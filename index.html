@@ -501,6 +501,7 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
           <button class="btn btn-soft" id="btnCopyJson">📋 Copy JSON</button>
           <button class="btn btn-soft" id="btnDownloadJson">⬇️ JSON</button>
           <button class="btn btn-soft" id="btnDownloadCsv">⬇️ CSV</button>
+          <button class="btn btn-soft" id="btnDownloadXlsx">⬇️ Excel</button>
         </div>
       </div>
 
@@ -585,6 +586,21 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
     </div>
     <div class="field"><label>Note (optional)</label>
       <input class="input" id="fNote" placeholder="Add a little detail…" maxlength="120"></div>
+    <div class="field"><label>Location (optional)</label>
+      <div class="io-row">
+        <button type="button" class="btn btn-soft" id="btnGeo" style="flex:1">📍 Add current location</button>
+        <button type="button" class="mini" id="btnGeoClear" style="display:none" aria-label="Clear location">✕</button>
+      </div>
+      <div class="footer-note" id="geoLabel" style="margin-top:6px"></div>
+    </div>
+    <div class="field"><label>Photo (optional)</label>
+      <input type="file" id="fPhoto" accept="image/*" capture="environment" style="display:none">
+      <div class="io-row">
+        <button type="button" class="btn btn-soft" id="btnPhoto" style="flex:1">📷 Add photo</button>
+        <button type="button" class="mini" id="btnPhotoClear" style="display:none" aria-label="Remove photo">✕</button>
+      </div>
+      <img id="photoPreview" alt="" style="display:none;margin-top:8px;max-width:100%;max-height:220px;border-radius:10px;object-fit:cover">
+    </div>
   </div>
 
   <div class="sheet-err" id="sheetErr"></div>
@@ -606,6 +622,9 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
   </div>
 </div>
 
+<!-- ===== PHOTO VIEWER ===== -->
+<div id="photoViewer" role="dialog" aria-modal="true" aria-label="Photo"><img id="photoViewerImg" alt="Expense photo"></div>
+
 <!-- ===== TOAST ===== -->
 <div id="toast"></div>
 
@@ -624,9 +643,12 @@ import {
   convert, sanitizeRates, computePace, sanitizeBudgets,
   toCSV, parseAmount,
   LOCALES, STRINGS, t, setLocale,
-  chunkPayload, reassemble
+  chunkPayload, reassemble,
+  geoMapUrl, workbookSheets
 } from "./js/core.js";
 import { makeQR } from "./js/vendor/qrcode.js";
+import { buildXlsx } from "./js/xlsx.js";
+import { savePhoto, loadPhoto, deletePhoto, downscaleImage, purgeOrphans } from "./js/photos.js";
 
 const STORE_KEY    = "triptally.v2";
 const STORE_KEY_V1 = "triptally.v1"; // kept as a safety backup after migration
@@ -899,13 +921,19 @@ function renderExpenseList(){
     const c = CAT_MAP[e.category] || CAT_MAP.others;
     const conv = convert(e.amount, e.currency, t);
     const approxAmt = conv.converted ? `<span class="amt-conv">≈ ${esc(fmtMoney(conv.value, t.currency))}</span>` : "";
+    const icon = e.photoId
+      ? `<img class="exp-thumb" data-pid="${esc(e.photoId)}" data-photo="${e.id}" alt="Photo">`
+      : c.emoji;
+    const locChip = (e.place || e.lat != null)
+      ? ` · <button class="loc-chip" data-map="${e.id}">📍 ${esc(e.place || "map")}</button>`
+      : "";
     return `<div class="exp-row" data-exp="${e.id}">
       <button class="exp-swipe-del" data-del="${e.id}" aria-label="Delete">🗑️</button>
       <div class="exp">
-        <span class="ico" style="background:${c.color}22">${c.emoji}</span>
+        <span class="ico" style="background:${c.color}22">${icon}</span>
         <div class="mid">
           <div class="name">${esc(e.item)}</div>
-          <div class="meta"><span class="cat-pill" style="background:${c.color}22;color:${c.color}">${esc(c.label)}</span> ${esc(fmtDate(e.date))}${e.note?" · "+esc(e.note):""}</div>
+          <div class="meta"><span class="cat-pill" style="background:${c.color}22;color:${c.color}">${esc(c.label)}</span> ${esc(fmtDate(e.date))}${e.note?" · "+esc(e.note):""}${locChip}</div>
         </div>
         <div class="right">
           <span class="amt">${esc(fmtMoney(e.amount, e.currency))}</span>${approxAmt}
@@ -938,6 +966,13 @@ function renderExpenseList(){
   } else {
     box.innerHTML = list.map(rowHTML).join("");
   }
+  // lazy-load photo thumbnails from IndexedDB
+  box.querySelectorAll(".exp-thumb[data-pid]").forEach(img => {
+    loadPhoto(img.dataset.pid).then(b => {
+      if(b) img.src = URL.createObjectURL(b);
+      else { img.replaceWith(Object.assign(document.createElement("span"), { textContent: "🖼️" })); }
+    });
+  });
 }
 
 function fillTripForm(){
@@ -1261,10 +1296,95 @@ function buildCategoryGrid(containerId, current, onPick){
   });
 }
 
+/* ---------- sheet: location + photo state ---------- */
+let sheetLat = null, sheetLng = null, sheetPlace = "";
+let sheetPhotoBlob = null, sheetPhotoId = null, sheetPhotoCleared = false;
+
+function updateGeoUI(){
+  const has = sheetLat != null && sheetLng != null;
+  $("geoLabel").textContent = has ? ("📍 " + (sheetPlace || (sheetLat.toFixed(4) + ", " + sheetLng.toFixed(4)))) : "";
+  $("btnGeoClear").style.display = has ? "" : "none";
+  $("btnGeo").textContent = has ? "📍 Update location" : "📍 Add current location";
+}
+function captureLocation(){
+  if(!navigator.geolocation){ toast("Location isn't available here"); return; }
+  $("btnGeo").textContent = "Locating…"; $("btnGeo").disabled = true;
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    sheetLat = Math.round(pos.coords.latitude * 1e6) / 1e6;
+    sheetLng = Math.round(pos.coords.longitude * 1e6) / 1e6;
+    sheetPlace = ""; updateGeoUI(); haptic();
+    $("btnGeo").disabled = false;
+    if(navigator.onLine){
+      const name = await reverseGeocode(sheetLat, sheetLng);
+      if(name){ sheetPlace = name; updateGeoUI(); }
+    }
+  }, (err) => {
+    $("btnGeo").disabled = false; updateGeoUI();
+    toast(err && err.code === 1 ? "Location permission denied" : "Couldn't get your location");
+  }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+}
+async function reverseGeocode(lat, lng){
+  try{
+    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=14&addressdetails=1`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if(!res.ok) return "";
+    const d = await res.json();
+    const a = d.address || {};
+    const local = a.neighbourhood || a.suburb || a.quarter || a.hamlet || a.village || a.town || a.city_district;
+    const city = a.city || a.town || a.county;
+    const parts = [...new Set([local, city, a.country].filter(Boolean))].slice(0, 2);
+    const label = parts.length ? parts.join(", ") : (d.display_name || "").split(",").slice(0, 2).join(",").trim();
+    return (label || "").slice(0, 80);
+  }catch{ return ""; }
+}
+function clearLocation(){ sheetLat = null; sheetLng = null; sheetPlace = ""; updateGeoUI(); }
+
+function updatePhotoUI(){
+  const img = $("photoPreview");
+  if(sheetPhotoBlob){ img.src = URL.createObjectURL(sheetPhotoBlob); img.style.display = "block"; }
+  else if(sheetPhotoId && !sheetPhotoCleared){
+    loadPhoto(sheetPhotoId).then(b => { if(b){ img.src = URL.createObjectURL(b); img.style.display = "block"; } else img.style.display = "none"; });
+  } else { img.removeAttribute("src"); img.style.display = "none"; }
+  const has = !!sheetPhotoBlob || (sheetPhotoId && !sheetPhotoCleared);
+  $("btnPhotoClear").style.display = has ? "" : "none";
+  $("btnPhoto").textContent = has ? "📷 Change photo" : "📷 Add photo";
+}
+async function onPhotoPicked(file){
+  if(!file) return;
+  $("btnPhoto").textContent = "Processing…"; $("btnPhoto").disabled = true;
+  try{ sheetPhotoBlob = await downscaleImage(file); sheetPhotoCleared = false; updatePhotoUI(); }
+  catch(e){ console.warn("photo", e); toast("Couldn't process that image"); }
+  finally{ $("btnPhoto").disabled = false; updatePhotoUI(); }
+}
+function clearPhotoFromSheet(){ sheetPhotoBlob = null; sheetPhotoCleared = true; updatePhotoUI(); }
+
+function openPhotoViewer(pid){
+  if(!pid) return;
+  loadPhoto(pid).then(b => {
+    if(!b){ toast("Photo not found"); return; }
+    const img = $("photoViewerImg");
+    if(img.src) URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(b);
+    $("photoViewer").classList.add("open");
+  });
+}
+function closePhotoViewer(){
+  $("photoViewer").classList.remove("open");
+  const img = $("photoViewerImg");
+  if(img.src) URL.revokeObjectURL(img.src);
+  img.removeAttribute("src");
+}
+
 function openSheet(expense){
   _lastTrigger = document.activeElement;
   editingId = expense ? expense.id : null;
   $("sheetTitle").textContent = expense ? "Edit expense" : "Add expense";
+  sheetLat = (expense && expense.lat != null) ? expense.lat : null;
+  sheetLng = (expense && expense.lng != null) ? expense.lng : null;
+  sheetPlace = (expense && expense.place) || "";
+  sheetPhotoId = (expense && expense.photoId) || null;
+  sheetPhotoBlob = null; sheetPhotoCleared = false;
+  updateGeoUI(); updatePhotoUI();
   $("sheetSave").textContent = expense ? "Save changes" : "Save expense";
   $("sheetErr").classList.remove("show");
   $("amountWrap").classList.remove("err");
@@ -1293,7 +1413,7 @@ function closeSheet(){
   document.activeElement && document.activeElement.blur();
   if(_lastTrigger && _lastTrigger.focus){ try{ _lastTrigger.focus(); }catch(e){ /* gone */ } _lastTrigger = null; }
 }
-function saveFromSheet(){
+async function saveFromSheet(){
   const amount = parseAmount($("fAmount").value);
   const item = $("fItem").value.trim();
   const date = $("fDate").value || todayStr();
@@ -1306,17 +1426,35 @@ function saveFromSheet(){
   if(!(amount>0)){ err("Amount must be a positive number."); $("amountWrap").classList.add("err"); $("fAmount").focus(); return; }
   if(!isValidDate(date)){ err("Please choose a valid date."); return; }
 
-  if(editingId){
-    const e = state.expenses.find(x=>x.id===editingId);
-    if(e) Object.assign(e, { item, amount:Math.round(amount*100)/100, currency:cur, category:sheetCat, date, note });
-    toast("✅ Expense updated");
+  const wasEditing = !!editingId;
+  let target;
+  if(wasEditing){
+    target = state.expenses.find(x=>x.id===editingId);
+    if(target) Object.assign(target, { item, amount:Math.round(amount*100)/100, currency:cur, category:sheetCat, date, note });
   } else {
-    state.expenses.push({ id:uid(), item, amount:Math.round(amount*100)/100, currency:cur, category:sheetCat, date, note, createdAt:Date.now() });
-    toast("✅ Expense added");
+    target = { id:uid(), item, amount:Math.round(amount*100)/100, currency:cur, category:sheetCat, date, note, createdAt:Date.now() };
+    state.expenses.push(target);
+  }
+  if(target){
+    // location
+    if(sheetLat != null && sheetLng != null){
+      target.lat = sheetLat; target.lng = sheetLng;
+      if(sheetPlace) target.place = sheetPlace; else delete target.place;
+    } else { delete target.lat; delete target.lng; delete target.place; }
+    // photo (binary -> IndexedDB; only the id stays in state)
+    if(sheetPhotoBlob){
+      const pid = target.photoId || (uid() + "img");
+      try{ await savePhoto(pid, sheetPhotoBlob); target.photoId = pid; }
+      catch(e){ console.warn("photo save", e); toast("Couldn't save the photo"); }
+    } else if(sheetPhotoCleared && target.photoId){
+      deletePhoto(target.photoId); delete target.photoId;
+    }
   }
   state.settings.lastCategory = sheetCat;
+  haptic();
   closeSheet();
   refresh();
+  toast(wasEditing ? "✅ Expense updated" : "✅ Expense added");
 }
 
 /* ============================================================
@@ -1464,6 +1602,19 @@ function downloadCSV(){
     setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 200);
     toast("⬇️ CSV file ready");
   }catch(e){ toast("Couldn't export CSV"); }
+}
+function downloadXLSX(){
+  if(!state.expenses.length){ toast("No expenses to export"); return; }
+  try{
+    const bytes = buildXlsx(workbookSheets(activeTrip(), stats()));
+    const blob = new Blob([bytes], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href=url; a.download = "triptally-" + tripSlug() + "-" + todayStr() + ".xlsx";
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 200);
+    toast("⬇️ Excel file ready");
+  }catch(e){ console.warn("xlsx export failed", e); toast("Couldn't export Excel"); }
 }
 /* ---------- device-to-device transfer (Phase 8) ---------- */
 function bytesToB64(u8){
@@ -1791,6 +1942,11 @@ function init(){
   $("moreToggle").addEventListener("click", ()=> $("advanced").classList.toggle("show"));
   $("fCurrency").addEventListener("change", ()=> $("curTag").textContent=$("fCurrency").value);
   $("fItem").addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); $("fAmount").focus(); }});
+  $("btnGeo").addEventListener("click", captureLocation);
+  $("btnGeoClear").addEventListener("click", clearLocation);
+  $("btnPhoto").addEventListener("click", ()=> $("fPhoto").click());
+  $("btnPhotoClear").addEventListener("click", clearPhotoFromSheet);
+  $("fPhoto").addEventListener("change", e=>{ onPhotoPicked(e.target.files[0]); e.target.value=""; });
 
   // quick add
   $("qaDate").value = isValidDate(state.settings.lastDate) ? state.settings.lastDate : quickDateDefault();
@@ -1804,11 +1960,15 @@ function init(){
   // search (live)
   $("searchInput").addEventListener("input", ()=>{ expenseSearch = $("searchInput").value; renderExpenseList(); });
 
-  // expense list (delegated): edit / delete / repeat
+  // expense list (delegated): map / photo / edit / delete / repeat
   $("expenseList").addEventListener("click", e=>{
+    const mp = e.target.closest("[data-map]");
+    const ph = e.target.closest("[data-photo]");
     const ed = e.target.closest("[data-edit]");
     const dl = e.target.closest("[data-del]");
     const rp = e.target.closest("[data-repeat]");
+    if(mp){ const x = state.expenses.find(z=>z.id===mp.dataset.map); if(x && x.lat!=null) window.open(geoMapUrl(x.lat, x.lng), "_blank", "noopener"); return; }
+    if(ph){ openPhotoViewer(ph.dataset.pid); return; }
     if(rp){ repeatExpense(rp.dataset.repeat); return; }
     if(ed){ const x = state.expenses.find(z=>z.id===ed.dataset.edit); if(x) openSheet(x); return; }
     if(dl){ deleteExpense(dl.dataset.del); }
@@ -1830,6 +1990,7 @@ function init(){
 
   // CSV export
   $("btnDownloadCsv").addEventListener("click", downloadCSV);
+  $("btnDownloadXlsx").addEventListener("click", downloadXLSX);
 
   // sort / filter
   $("sortSelect").addEventListener("change", ()=>{ state.settings.sort=$("sortSelect").value; saveState(); renderExpenseList(); });
@@ -1907,8 +2068,14 @@ function init(){
   if(!window.showSaveFilePicker) $("btnSaveFile").textContent = "💾 Download backup";
   if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) $("btnScanQR").style.display = "";
 
-  // close sheet/modal on Escape (useful on desktop testing)
-  document.addEventListener("keydown", e=>{ if(e.key==="Escape"){ closeSheet(); $("modal").classList.remove("open"); $("modalBackdrop").classList.remove("open"); }});
+  // photo viewer: tap or Escape to close
+  $("photoViewer").addEventListener("click", closePhotoViewer);
+
+  // close sheet/modal/viewer on Escape (useful on desktop testing)
+  document.addEventListener("keydown", e=>{ if(e.key==="Escape"){ closeSheet(); closePhotoViewer(); $("modal").classList.remove("open"); $("modalBackdrop").classList.remove("open"); }});
+
+  // tidy up photo blobs whose expense was deleted
+  purgeOrphans(state.trips.flatMap(tr => tr.expenses.map(e => e.photoId).filter(Boolean)));
 }
 
 // tiny shake keyframe + multi-trip card styles injected
@@ -1958,6 +2125,14 @@ _st.textContent = `
 .qr-item{display:flex;flex-direction:column;align-items:center;gap:4px}
 .qr-item canvas{width:200px;height:200px;image-rendering:pixelated;border:6px solid #fff;border-radius:8px;box-shadow:var(--shadow)}
 .qr-item .qr-label{font-size:12px;font-weight:700;color:var(--muted)}
+.io-row{display:flex;align-items:center;gap:8px}
+.exp .ico{overflow:hidden}
+.exp-thumb{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit;cursor:pointer}
+.loc-chip{border:none;background:none;padding:0;margin:0;font:inherit;color:var(--accent);cursor:pointer;font-weight:600}
+.loc-chip:hover{text-decoration:underline}
+#photoViewer{position:fixed;inset:0;z-index:120;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.88);padding:20px;cursor:zoom-out}
+#photoViewer.open{display:flex}
+#photoViewer img{max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.6)}
 `;
 document.head.appendChild(_st);
 
