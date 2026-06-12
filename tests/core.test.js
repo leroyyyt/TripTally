@@ -291,7 +291,7 @@ describe("defaultStateV2", () => {
     expect(s.version).toBe(2);
     expect(s.trips.length).toBe(1);
     expect(s.activeTripId).toBe(s.trips[0].id);
-    expect(s.settings.theme).toBe("light");
+    expect(s.settings.theme).toBe("auto");
   });
 });
 
