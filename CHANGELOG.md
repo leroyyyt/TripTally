@@ -15,7 +15,8 @@ features, accessibility + internationalization, and serverless device-to-device 
 ### Added
 - **Device-to-device transfer & file backup (Phase 8):**
   - "Transfer to another device" with **no server**: the active export is gzip-compressed (`CompressionStream`) + base64 and split into labelled chunks (`chunkPayload`/`reassemble`, unit-tested).
-  - **QR codes**: a self-contained, dependency-free QR encoder vendored at `js/vendor/qrcode.js` (byte mode, versions 1–10, EC levels L–H, full Reed–Solomon + masking) renders the chunks as scannable codes with "i / N" labels. It was verified module-for-module against a real decoder (jsQR) over 240+ random inputs. "Receive" scans them via `BarcodeDetector` where available, or you paste the code — both decompress and merge via the existing v2 importer.
+  - **QR codes**: a self-contained QR encoder vendored at `js/vendor/qrcode.js` (byte mode, versions 1–10, EC levels L–H, full Reed–Solomon + masking) renders the chunks as scannable codes with "i / N" labels, verified module-for-module against a real decoder over 240+ random inputs.
+  - **Scan to import**: a "📷 Scan QR codes" button opens the camera and reads the codes back. It uses `BarcodeDetector` when present and otherwise lazy-loads a vendored jsQR decoder (`js/vendor/jsQR.js`), so scanning works on any camera-capable browser including iOS Safari. The full encode→QR→scan→reassemble→gunzip→import round-trip is verified end-to-end. Pasting the code remains as a fallback.
   - **Web Share Level 2**: share the backup as an actual `.json` file via `navigator.share({files})` when supported.
   - **File System Access**: "Save backup file…" remembers the handle for one-tap "Backup now"; falls back to a normal download. Everything is feature-detected.
 - **Accessibility, i18n & polish (Phase 7):**

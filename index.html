@@ -1535,17 +1535,39 @@ async function showQRCodes(){
     toast(`📱 ${parts.length} QR code${parts.length===1?"":"s"} — scan in order on the other device`);
   }catch(e){ console.warn("qr failed", e); toast("Couldn't render QR codes"); }
 }
-// Optional camera scanning via BarcodeDetector (feature-detected; paste is the fallback).
+// Camera scanning. Decodes with jsQR (lazy-loaded, works on every browser with a
+// camera — including iOS Safari). A BarcodeDetector fast-path is used when present.
 let _scanStop = null;
+function loadJsQR(){
+  return new Promise((resolve, reject) => {
+    if(window.jsQR) return resolve(window.jsQR);
+    const s = document.createElement("script");
+    s.src = "./js/vendor/jsQR.js";
+    s.onload = () => window.jsQR ? resolve(window.jsQR) : reject(new Error("decoder missing"));
+    s.onerror = () => reject(new Error("decoder load failed"));
+    document.head.appendChild(s);
+  });
+}
 async function scanQR(){
   if(_scanStop){ _scanStop(); return; }
-  if(!("BarcodeDetector" in window)){ toast("Camera scan not supported here — paste instead"); return; }
+  if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){ toast("No camera here — paste the code instead"); return; }
   const video = $("scanVideo");
+  let decode;
+  if("BarcodeDetector" in window){
+    const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+    decode = async (canvas) => { const codes = await det.detect(canvas); return codes[0] && codes[0].rawValue; };
+  } else {
+    let jsqr;
+    try{ jsqr = await loadJsQR(); }
+    catch(e){ console.warn(e); toast("Couldn't load the scanner — paste instead"); return; }
+    decode = (canvas) => { const ctx = canvas.getContext("2d", { willReadFrequently: true }); const img = ctx.getImageData(0, 0, canvas.width, canvas.height); const r = jsqr(img.data, img.width, img.height); return r && r.data; };
+  }
   try{
-    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-    video.srcObject = stream; video.style.display = "block"; await video.play();
+    video.srcObject = stream; video.style.display = "block"; video.setAttribute("muted", ""); await video.play();
     $("btnScanQR").textContent = "■ Stop scanning";
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const seen = new Map(); let total = null, done = false;
     const stop = () => {
       done = true; stream.getTracks().forEach(t => t.stop());
@@ -1555,25 +1577,23 @@ async function scanQR(){
     _scanStop = stop;
     const tick = async () => {
       if(done) return;
-      try{
-        const codes = await detector.detect(video);
-        for(const code of codes){
-          const m = /^TT(\d+)\/(\d+):/.exec(code.rawValue || "");
-          if(!m) continue;
-          total = +m[2];
-          if(!seen.has(+m[1])){ seen.set(+m[1], code.rawValue); haptic(); toast(`📷 Captured ${seen.size}/${total}`); }
-          if(seen.size === total){
-            stop();
-            $("transferIn").value = [...seen.values()].join("\n");
-            receiveFromDevice();
-            return;
+      if(video.videoWidth){
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        try{
+          const val = await decode(canvas);
+          const m = val && /^TT(\d+)\/(\d+):/.exec(val);
+          if(m){
+            total = +m[2];
+            if(!seen.has(+m[1])){ seen.set(+m[1], val); haptic(); toast(`📷 Captured ${seen.size}/${total}`); }
+            if(seen.size === total){ stop(); $("transferIn").value = [...seen.values()].join("\n"); receiveFromDevice(); return; }
           }
-        }
-      }catch(e){ /* keep scanning */ }
+        }catch(e){ /* keep scanning */ }
+      }
       requestAnimationFrame(tick);
     };
     tick();
-  }catch(e){ console.warn("scan failed", e); toast("Couldn't start the camera"); }
+  }catch(e){ console.warn("scan failed", e); toast("Couldn't start the camera"); if(_scanStop) _scanStop(); }
 }
 async function receiveFromDevice(){
   const raw = $("transferIn").value.trim();
@@ -1885,7 +1905,7 @@ function init(){
   $("btnScanQR").addEventListener("click", scanQR);
   if(!(navigator.canShare)) $("btnShareFile").style.display = "none";
   if(!window.showSaveFilePicker) $("btnSaveFile").textContent = "💾 Download backup";
-  if("BarcodeDetector" in window && navigator.mediaDevices) $("btnScanQR").style.display = "";
+  if(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) $("btnScanQR").style.display = "";
 
   // close sheet/modal on Escape (useful on desktop testing)
   document.addEventListener("keydown", e=>{ if(e.key==="Escape"){ closeSheet(); $("modal").classList.remove("open"); $("modalBackdrop").classList.remove("open"); }});
