@@ -1,6 +1,6 @@
 # TripTally — Architecture
 
-TripTally is a single self-contained file, `index.html`, containing three things: a `<style>` block (all CSS, themed with custom properties on `:root` / `body.dark`), the markup, and one vanilla-JavaScript `<script>` block holding all application logic. There is no framework, no build step, and no runtime dependency.
+TripTally is shipped as a single self-contained file, `index.html`, containing three things: a `<style>` block (all CSS, themed with custom properties on `:root` / `body.dark`), the markup, and one vanilla-JavaScript `<script>` block holding all runtime application logic. There is no framework, no build step, and no runtime dependency. The separate files under `js/` are kept as testable source mirrors and helper modules for development.
 
 ## State shape (schema v2 — multi-trip)
 
@@ -46,7 +46,7 @@ Most of the UI code still reads `state.trip` and `state.expenses`. Those are **n
 
 ## Core logic functions
 
-The pure, DOM-free logic lives in `js/core.js` (an ES module, unit-tested by `tests/core.test.js`). `index.html` imports it. These functions take their inputs as arguments rather than reading globals, which is what makes them testable:
+The pure, DOM-free logic is mirrored in `js/core.js` (an ES module, unit-tested by `tests/core.test.js`). The shipped `index.html` inlines the runtime copy so the app also works from `file://`. These functions take their inputs as arguments rather than reading globals, which is what makes them testable:
 
 - `computeStats(trip, expenses)` — aggregates expenses into `baseTotal`, per-category (`cats`) and per-day (`days`) breakdowns, budget math (`remaining`, `pctOfBudget`, `overBudget`), and `dailyAvg`. **Only expenses in the trip currency** count toward totals; everything else is collected in `other[]`.
 - `daysForAverage(trip, expenses)` — the divisor for the daily average: the inclusive trip length when dates are set, otherwise the span the recorded expenses cover (minimum 1).

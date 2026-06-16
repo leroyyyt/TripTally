@@ -105,10 +105,17 @@ export function normalizeExpense(raw){
   return out;
 }
 
-// Link that opens a coordinate in OpenStreetMap (and most native map apps).
-export function geoMapUrl(lat, lng){
-  if(!isFinite(Number(lat)) || !isFinite(Number(lng))) return "";
-  return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=17/${lat}/${lng}`;
+// Explicit opt-out link: opens Google Maps only when the user taps a map action.
+// TripTally never reverse-geocodes or uploads coordinates automatically.
+export function geoMapUrl(lat, lng, place = ""){
+  const latNum = Number(lat), lngNum = Number(lng);
+  const hasCoords = lat !== null && lat !== "" && lng !== null && lng !== "" &&
+    isFinite(latNum) && isFinite(lngNum) && Math.abs(latNum) <= 90 && Math.abs(lngNum) <= 180;
+  const query = hasCoords
+    ? `${latNum},${lngNum}`
+    : String(place || "").trim();
+  if(!query) return "";
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
 }
 
 /* ---------- stats ---------- */

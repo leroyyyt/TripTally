@@ -382,6 +382,7 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
   <main>
     <!-- ============ DASHBOARD ============ -->
     <section class="view active" id="view-dashboard">
+      <div id="dashboardBody" class="stagger"></div>
       <!-- Quick add (always visible, the fast path) -->
       <div class="card" id="quickAddCard">
         <div class="section-label">⚡ Quick add</div>
@@ -395,7 +396,6 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
         <div class="advanced" id="qaAdvBox"><div id="qa_io" class="io-block"></div></div>
         <button class="btn btn-primary btn-block qa-add" id="qaAdd" style="margin-top:9px">＋ Add expense</button>
       </div>
-      <div id="dashboardBody" class="stagger"></div>
     </section>
 
     <!-- ============ EXPENSES ============ -->
@@ -623,20 +623,990 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:
    Pure logic lives in ./js/core.js; this script wires it to the DOM.
    All data lives in localStorage on this device only.
    ============================================================ */
-import {
-  CATEGORIES, CAT_MAP, CURRENCIES,
-  esc, clamp, isValidDate, todayStr, uid, fmtMoney, fmtDate,
-  normalizeExpense, daysForAverage, computeStats, buildSummaryText, mergeExpenses,
-  DEFAULT_SETTINGS, newTrip, defaultStateV2, migrateV1toV2, mergeTrips,
-  convert, sanitizeRates, computePace, sanitizeBudgets,
-  toCSV, parseAmount,
-  LOCALES, STRINGS, t, setLocale,
-  chunkPayload, reassemble,
-  geoMapUrl, workbookSheets
-} from "./js/core.js";
-import { makeQR } from "./js/vendor/qrcode.js";
-import { buildXlsx } from "./js/xlsx.js";
-import { savePhoto, loadPhoto, deletePhoto, downscaleImage, purgeOrphans } from "./js/photos.js";
+
+/* ---------- inlined from js/core.js for file:// support ---------- */
+/* ============================================================
+   TripTally — core (pure, DOM-free logic)
+   Imported by index.html (as an ES module) and exercised by
+   the vitest suite in tests/. No DOM, no globals, no storage.
+   ============================================================ */
+
+/* ---------- constants ---------- */
+const CATEGORIES = [
+  { key:"food",       label:"Food",       emoji:"🍜", color:"#f59e0b" },
+  { key:"transport",  label:"Transport",  emoji:"🚕", color:"#3b82f6" },
+  { key:"hotel",      label:"Hotel",      emoji:"🏨", color:"#8b5cf6" },
+  { key:"activities", label:"Activities", emoji:"🎟️", color:"#10b981" },
+  { key:"shopping",   label:"Shopping",   emoji:"🛍️", color:"#ec4899" },
+  { key:"emergency",  label:"Emergency",  emoji:"🚨", color:"#ef4444" },
+  { key:"others",     label:"Others",     emoji:"✨", color:"#64748b" },
+];
+const CAT_MAP = Object.fromEntries(CATEGORIES.map(c => [c.key, c]));
+const CURRENCIES = ["USD","EUR","GBP","JPY","SGD","THB","MYR","IDR","VND","INR",
+  "AUD","CAD","CNY","KRW","HKD","PHP","TWD","AED","CHF","NZD","ZAR","BRL","MXN","TRY"];
+
+/* ---------- i18n (Phase 7) ---------- */
+const LOCALES = { en: "English", id: "Bahasa Indonesia" };
+const STRINGS = {
+  en: {
+    tagline:"Your travel spending, sorted",
+    nav_home:"Home", nav_expenses:"Expenses", nav_trip:"Trip", nav_share:"Share",
+    title_expenses:"Expenses", title_trips:"My trips", title_share:"Share & backup",
+    total_spent:"TOTAL SPENT", by_category:"Spending by category", by_day:"Spending by day",
+    new_trip:"＋ New trip", search_ph:"🔍 Search item or note…",
+    add_expense:"Add expense", save_expense:"Save expense", cancel:"Cancel",
+    language:"Language",
+    t_added:"Added", t_updated:"Expense updated", t_deleted:"Deleted", t_restored:"Restored"
+  },
+  id: {
+    tagline:"Pengeluaran perjalanan Anda, rapi",
+    nav_home:"Beranda", nav_expenses:"Pengeluaran", nav_trip:"Perjalanan", nav_share:"Bagikan",
+    title_expenses:"Pengeluaran", title_trips:"Perjalanan saya", title_share:"Bagikan & cadangkan",
+    total_spent:"TOTAL DIBELANJAKAN", by_category:"Pengeluaran per kategori", by_day:"Pengeluaran per hari",
+    new_trip:"＋ Perjalanan baru", search_ph:"🔍 Cari item atau catatan…",
+    add_expense:"Tambah pengeluaran", save_expense:"Simpan", cancel:"Batal",
+    language:"Bahasa",
+    t_added:"Ditambahkan", t_updated:"Pengeluaran diperbarui", t_deleted:"Dihapus", t_restored:"Dipulihkan"
+  }
+};
+let _locale; // active BCP-47 locale for Intl formatting; undefined → system default
+function setLocale(loc){ _locale = loc || undefined; }
+function t(key, locale){
+  const table = STRINGS[locale] || STRINGS[_locale] || STRINGS.en;
+  if(table && table[key] != null) return table[key];
+  return STRINGS.en[key] != null ? STRINGS.en[key] : key;
+}
+
+/* ---------- small helpers ---------- */
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+
+function esc(s){
+  return String(s??"").replace(/[&<>"']/g, m =>
+    ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
+}
+
+function clamp(n,lo,hi){ return Math.max(lo, Math.min(hi, n)); }
+
+function todayStr(){
+  const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0,10);
+}
+
+function isValidDate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s)); }
+
+function fmtMoney(amount, currency){
+  const cur = currency || "USD";
+  const n = Number(amount) || 0;
+  try { return new Intl.NumberFormat(_locale,{ style:"currency", currency:cur, maximumFractionDigits:2 }).format(n); }
+  catch { return (Math.round(n*100)/100).toLocaleString() + " " + cur; }
+}
+
+function fmtDate(s){
+  if(!isValidDate(s)) return s||"";
+  return new Date(s+"T00:00:00").toLocaleDateString(_locale,{weekday:"short",day:"numeric",month:"short"});
+}
+
+/* ---------- expense normalization ---------- */
+function normalizeExpense(raw){
+  if(!raw || typeof raw!=="object") return null;
+  const amount = Number(String(raw.amount).replace(",", "."));
+  const item = (raw.item||raw.name||"").toString().trim();
+  if(!item || !(amount>0)) return null;
+  let date = (raw.date||"").toString().slice(0,10);
+  if(!isValidDate(date)) date = todayStr();
+  const cat = CAT_MAP[raw.category] ? raw.category : "others";
+  const currency = (raw.currency||"USD").toString().toUpperCase().slice(0,6) || "USD";
+  const out = {
+    id: raw.id || uid(),
+    item, amount: Math.round(amount*100)/100, currency, category:cat, date,
+    note: (raw.note||"").toString().trim(),
+    createdAt: Number(raw.createdAt) || Date.now()
+  };
+  // optional geotag
+  const lat = Number(raw.lat), lng = Number(raw.lng);
+  if(isFinite(lat) && isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180){ out.lat = lat; out.lng = lng; }
+  const place = (raw.place||"").toString().trim().slice(0,80);
+  if(place) out.place = place;
+  // optional photo (binary lives in IndexedDB; only the id rides in state)
+  if(raw.photoId) out.photoId = String(raw.photoId).slice(0,60);
+  return out;
+}
+
+// Explicit opt-out link: opens Google Maps only when the user taps a map action.
+// TripTally never reverse-geocodes or uploads coordinates automatically.
+function geoMapUrl(lat, lng, place = ""){
+  const latNum = Number(lat), lngNum = Number(lng);
+  const hasCoords = lat !== null && lat !== "" && lng !== null && lng !== "" &&
+    isFinite(latNum) && isFinite(lngNum) && Math.abs(latNum) <= 90 && Math.abs(lngNum) <= 180;
+  const query = hasCoords
+    ? `${latNum},${lngNum}`
+    : String(place || "").trim();
+  if(!query) return "";
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+/* ---------- stats ---------- */
+function daysForAverage(trip, expenses){
+  const { startDate, endDate } = trip;
+  // Primary: the whole length of the trip — first day through last day, inclusive.
+  if(isValidDate(startDate) && isValidDate(endDate)){
+    const start = new Date(startDate+"T00:00:00");
+    const end   = new Date(endDate+"T00:00:00");
+    if(end >= start) return Math.floor((end - start)/86400000) + 1;
+  }
+  // Fallback (no trip dates yet): the span the recorded expenses cover.
+  const times = expenses
+    .filter(e => e.currency===trip.currency && isValidDate(e.date))
+    .map(e => new Date(e.date+"T00:00:00").getTime());
+  if(times.length){
+    return Math.max(1, Math.floor((Math.max(...times) - Math.min(...times))/86400000) + 1);
+  }
+  return 1;
+}
+
+// Convert `amount` of currency `from` into the trip's base currency.
+// Returns { value, converted }. converted is true ONLY when an actual
+// foreign→base conversion was applied via a stored rate.
+function convert(amount, from, trip){
+  const base = trip.currency;
+  if(from === base) return { value: amount, converted: false };
+  const rate = trip.rates && trip.rates[from];
+  if(typeof rate === "number" && rate > 0) return { value: amount * rate, converted: true };
+  return { value: amount, converted: false }; // no rate: caller treats as unconvertible
+}
+
+function computeStats(trip, expenses){
+  const base = trip.currency;
+  const byCur = {}, byCat = {}, byDay = {};
+  let baseTotal = 0;
+  let approx = false;
+  const unconverted = new Set();
+  for(const e of expenses){
+    byCur[e.currency] = (byCur[e.currency]||0) + e.amount;
+    let contribution = null;
+    if(e.currency === base){
+      contribution = e.amount;
+    } else {
+      const r = convert(e.amount, e.currency, trip);
+      if(r.converted){ contribution = r.value; approx = true; }
+      else { unconverted.add(e.currency); }
+    }
+    if(contribution != null){
+      baseTotal += contribution;
+      byCat[e.category] = (byCat[e.category]||0) + contribution;
+      byDay[e.date] = (byDay[e.date]||0) + contribution;
+    }
+  }
+  const catBudgets = trip.budgets || {};
+  const cats = CATEGORIES
+    .filter(c => byCat[c.key])
+    .map(c => {
+      const amount = byCat[c.key];
+      const o = { ...c, amount, pct: baseTotal ? amount/baseTotal*100 : 0 };
+      const cb = catBudgets[c.key];
+      if(typeof cb === "number" && cb > 0){
+        o.catBudget = cb;
+        o.catPct = amount/cb*100;
+        o.catLevel = amount > cb ? "over" : (amount >= cb*0.8 ? "warn" : "ok");
+      }
+      return o;
+    })
+    .sort((a,b)=> b.amount - a.amount);
+  const days = Object.keys(byDay).sort().map(d => ({ date:d, amount:byDay[d] }));
+  const maxDay = days.reduce((m,d)=>Math.max(m,d.amount), 0);
+  // other[] keeps only currencies with no rate set (still excluded from totals)
+  const other = [...unconverted].map(c => ({ currency:c, amount:byCur[c] }));
+
+  const budget = (typeof trip.budget==="number" && trip.budget>0) ? trip.budget : null;
+  const remaining = budget!=null ? budget - baseTotal : null;
+  const pctOfBudget = budget!=null ? baseTotal/budget*100 : null;
+  const dAvg = daysForAverage(trip, expenses);
+
+  return {
+    baseTotal, count: expenses.length, cats, days, maxDay, other, approx,
+    budget, remaining, pctOfBudget, overBudget: budget!=null && baseTotal>budget,
+    dailyAvg: baseTotal/dAvg, daysCount:dAvg, base
+  };
+}
+
+/* ---------- daily pace / projection (Phase 5) ----------
+   Returns null unless the trip has start+end dates, a budget, and `today`
+   falls within the trip. `today` is injected ("YYYY-MM-DD") for testability. */
+function computePace(trip, stats, today){
+  if(!isValidDate(trip.startDate) || !isValidDate(trip.endDate)) return null;
+  if(stats.budget == null) return null;
+  if(!isValidDate(today)) return null;
+  const start = new Date(trip.startDate+"T00:00:00");
+  const end   = new Date(trip.endDate+"T00:00:00");
+  const now   = new Date(today+"T00:00:00");
+  if(end < start) return null;
+  if(now < start || now > end) return null; // only mid-trip
+
+  const totalDays = Math.floor((end - start)/86400000) + 1;
+  const dayOfTrip = Math.floor((now - start)/86400000) + 1; // 1-based, inclusive
+  const dailyAllowance = stats.budget / totalDays;
+  const allowanceToDate = dailyAllowance * dayOfTrip;
+  const spent = stats.baseTotal;
+  const avgPerDay = spent / dayOfTrip;
+  const projectedTotal = avgPerDay * totalDays;
+  const level = projectedTotal > stats.budget * 1.1 ? "over"
+              : projectedTotal > stats.budget ? "warn" : "ok";
+  return {
+    totalDays, dayOfTrip, dailyAllowance, allowanceToDate,
+    spent, avgPerDay, projectedTotal, budget: stats.budget,
+    onTrack: spent <= allowanceToDate, level
+  };
+}
+
+/* ---------- summary text ---------- */
+function buildSummaryText(trip, stats, fmt, pace){
+  const t = trip, s = stats;
+  const money = fmt || fmtMoney;
+  const L = [];
+  L.push("🧳 " + (t.name || "My Trip"));
+  if(t.destination) L.push("📍 " + t.destination);
+  if(isValidDate(t.startDate) || isValidDate(t.endDate))
+    L.push("🗓️ " + (isValidDate(t.startDate)?fmtDate(t.startDate):"?") + " → " + (isValidDate(t.endDate)?fmtDate(t.endDate):"?"));
+  L.push("");
+  const approx = s.approx ? "≈ " : "";
+  L.push("💰 Total spent: " + approx + money(s.baseTotal, s.base));
+  if(s.budget!=null){
+    L.push("🎯 Budget: " + money(s.budget, s.base));
+    L.push((s.overBudget?"🔴 Over by ":"🟢 Remaining: ") + money(Math.abs(s.remaining), s.base) + "  (" + Math.round(s.pctOfBudget) + "% used)");
+  }
+  L.push("🧾 Expenses: " + s.count);
+  L.push("📅 Daily average: " + approx + money(s.dailyAvg, s.base) + " over " + s.daysCount + " day" + (s.daysCount===1?"":"s"));
+  if(pace){
+    L.push("");
+    L.push("⏱️ Day " + pace.dayOfTrip + " of " + pace.totalDays);
+    L.push((pace.onTrack?"🟢 ":"⚠️ ") + "Spent " + money(pace.spent, s.base) + " vs " + money(pace.allowanceToDate, s.base) + " budgeted so far");
+    const icon = pace.level==="over" ? "🔴" : (pace.level==="warn" ? "⚠️" : "🟢");
+    L.push(icon + " Projected total: " + approx + money(pace.projectedTotal, s.base) + " of " + money(pace.budget, s.base));
+  }
+  if(s.cats.length){
+    L.push("");
+    L.push("BY CATEGORY");
+    for(const c of s.cats) L.push(c.emoji + " " + c.label + ": " + money(c.amount, s.base) + " (" + Math.round(c.pct) + "%)");
+  }
+  if(s.days.length){
+    L.push("");
+    L.push("BY DAY");
+    for(const d of s.days) L.push("• " + fmtDate(d.date) + ": " + money(d.amount, s.base));
+  }
+  if(s.other.length){
+    L.push("");
+    L.push("Other currencies (not converted): " + s.other.map(o=>money(o.amount,o.currency)).join(", "));
+  }
+  L.push("");
+  L.push("— Tracked with TripTally · data stays on device");
+  return L.join("\n");
+}
+
+/* ---------- import merge / dedupe ---------- */
+// Merge incoming (raw) expenses into existing (normalized) ones.
+// Skips duplicate ids AND duplicate item|amount|currency|category|date signatures.
+function mergeExpenses(existing, incoming){
+  const sig = e => [String(e.item).trim().toLowerCase(), e.amount, e.currency, e.category, e.date].join("|");
+  const merged = existing.slice();
+  const ids = new Set(existing.map(e=>e.id));
+  const sigs = new Set(existing.map(sig));
+  let added=0, skipped=0;
+  for(const raw of (Array.isArray(incoming)?incoming:[])){
+    const e = normalizeExpense(raw);
+    if(!e){ skipped++; continue; }
+    if(ids.has(e.id) || sigs.has(sig(e))){ skipped++; continue; }
+    merged.push(e); ids.add(e.id); sigs.add(sig(e)); added++;
+  }
+  return { merged, added, skipped };
+}
+
+/* ============================================================
+   MULTI-TRIP (schema v2) — Phase 3
+   v2 shape: { version:2, activeTripId, trips:[trip], settings }
+   trip:    { id, name, destination, startDate, endDate, budget,
+              currency, archived, createdAt, expenses:[] }
+   ============================================================ */
+const DEFAULT_SETTINGS = {
+  theme:"auto", locale:"", sort:"date-desc", filter:"all", lastCategory:"food", lastDate:""
+};
+
+// Keep only positive-number rates, keyed by an uppercased currency code.
+function sanitizeRates(r){
+  const out = {};
+  if(r && typeof r === "object"){
+    for(const k of Object.keys(r)){
+      const v = Number(r[k]);
+      if(v > 0 && isFinite(v)) out[k.toString().toUpperCase().slice(0,6)] = v;
+    }
+  }
+  return out;
+}
+
+// Keep only positive per-category budgets keyed by a known category.
+function sanitizeBudgets(b){
+  const out = {};
+  if(b && typeof b === "object"){
+    for(const k of Object.keys(b)){
+      const v = Number(b[k]);
+      if(v > 0 && isFinite(v) && CAT_MAP[k]) out[k] = v;
+    }
+  }
+  return out;
+}
+
+function newTrip(over = {}){
+  const o = over || {};
+  return {
+    id: o.id || uid(),
+    name: (o.name||"").toString().slice(0,60),
+    destination: (o.destination||"").toString().slice(0,60),
+    startDate: isValidDate(o.startDate) ? o.startDate : "",
+    endDate: isValidDate(o.endDate) ? o.endDate : "",
+    budget: (typeof o.budget==="number" && o.budget>0) ? o.budget : null,
+    budgets: sanitizeBudgets(o.budgets),
+    currency: (o.currency||"USD").toString().toUpperCase().slice(0,6) || "USD",
+    rates: sanitizeRates(o.rates),
+    ratesUpdatedAt: Number(o.ratesUpdatedAt) || null,
+    archived: !!o.archived,
+    createdAt: Number(o.createdAt) || Date.now(),
+    expenses: Array.isArray(o.expenses) ? o.expenses.map(normalizeExpense).filter(Boolean) : []
+  };
+}
+
+function defaultStateV2(){
+  const t = newTrip();
+  return { version:2, activeTripId:t.id, trips:[t], settings:{ ...DEFAULT_SETTINGS } };
+}
+
+// Wrap a v1 blob ({version:1, trip, expenses, settings}) as a single v2 trip.
+// Handles v1 present, v1 absent/null, and v1 corrupted (non-object) → fresh v2.
+function migrateV1toV2(v1){
+  if(!v1 || typeof v1!=="object" || Array.isArray(v1)) return defaultStateV2();
+  const t = newTrip({ ...(v1.trip||{}), expenses: v1.expenses });
+  return {
+    version:2,
+    activeTripId: t.id,
+    trips:[t],
+    settings:{ ...DEFAULT_SETTINGS, ...(v1.settings||{}) }
+  };
+}
+
+/* ============================================================
+   ENTRY & LIST POWER FEATURES — Phase 6
+   ============================================================ */
+
+// RFC-4180 CSV with a UTF-8 BOM so Excel reads accents correctly.
+function toCSV(expenses){
+  const headers = ["date","item","category","amount","currency","note"];
+  const cell = v => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const rows = (Array.isArray(expenses) ? expenses : []).map(e =>
+    [e.date, e.item, e.category, e.amount, e.currency, e.note || ""].map(cell).join(","));
+  return "﻿" + [headers.join(","), ...rows].join("\r\n");
+}
+
+// Build the sheet data for an .xlsx export (pure; js/xlsx.js turns it into a file).
+// Returns [{ name, rows: [[cell, ...]] }] where cells are strings/numbers.
+function workbookSheets(trip, stats){
+  const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const catLabel = k => (CAT_MAP[k] || {}).label || k;
+
+  const summary = [
+    ["TripTally export"],
+    ["Trip", trip.name || "My Trip"],
+    ["Destination", trip.destination || ""],
+    ["Dates", (trip.startDate || "?") + " to " + (trip.endDate || "?")],
+    ["Currency", trip.currency],
+    ["Budget", typeof trip.budget === "number" ? trip.budget : ""],
+    ["Total spent" + (stats.approx ? " (approx)" : ""), r2(stats.baseTotal)],
+    ["Expenses", stats.count],
+    [],
+    ["Category", "Amount", "% of total"]
+  ];
+  for(const c of stats.cats) summary.push([c.label, r2(c.amount), Math.round(c.pct)]);
+
+  const expenses = [["Date", "Item", "Category", "Amount", "Currency", "Note", "Place", "Photo", "Lat", "Lng"]];
+  for(const e of trip.expenses){
+    expenses.push([
+      e.date, e.item, catLabel(e.category), r2(e.amount), e.currency,
+      e.note || "", e.place || "", e.photoId ? "yes" : "",
+      (e.lat != null ? e.lat : ""), (e.lng != null ? e.lng : "")
+    ]);
+  }
+
+  const byCat = [["Category", "Amount", "% of total", "Budget", "Status"]];
+  for(const c of stats.cats) byCat.push([c.label, r2(c.amount), Math.round(c.pct), c.catBudget != null ? c.catBudget : "", c.catLevel || ""]);
+
+  const byDay = [["Date", "Amount"]];
+  for(const d of stats.days) byDay.push([d.date, r2(d.amount)]);
+
+  return [
+    { name: "Summary", rows: summary },
+    { name: "Expenses", rows: expenses },
+    { name: "By category", rows: byCat },
+    { name: "By day", rows: byDay }
+  ];
+}
+
+// Safe arithmetic for the amount field ("12+8.5", "2*3"). NO eval:
+// a tiny recursive-descent parser over + - * / and parentheses.
+// Returns a number rounded to 2dp, or null if the input isn't valid.
+function parseAmount(input){
+  if(typeof input === "number") return isFinite(input) ? Math.round(input*100)/100 : null;
+  let s = String(input == null ? "" : input).replace(/,/g, ".").trim();
+  if(!s) return null;
+  if(!/^[0-9+\-*/.()\s]+$/.test(s)) return null; // reject letters and anything unexpected
+  let i = 0;
+  const cur = () => s[i];
+  const ws = () => { while(i < s.length && s[i] === " ") i++; };
+  function factor(){
+    ws();
+    let sign = 1;
+    while(cur() === "+" || cur() === "-"){ if(s[i] === "-") sign = -sign; i++; ws(); }
+    if(cur() === "("){
+      i++;
+      const v = expr();
+      ws();
+      if(cur() !== ")") return null;
+      i++;
+      return v == null ? null : sign * v;
+    }
+    let num = "";
+    while(i < s.length && /[0-9.]/.test(s[i])) num += s[i++];
+    if(num === "" || isNaN(Number(num))) return null;
+    return sign * Number(num);
+  }
+  function term(){
+    let v = factor();
+    if(v == null) return null;
+    ws();
+    while(cur() === "*" || cur() === "/"){
+      const op = s[i++];
+      const f = factor();
+      if(f == null) return null;
+      if(op === "/" && f === 0) return null;
+      v = op === "*" ? v * f : v / f;
+      ws();
+    }
+    return v;
+  }
+  function expr(){
+    let v = term();
+    if(v == null) return null;
+    ws();
+    while(cur() === "+" || cur() === "-"){
+      const op = s[i++];
+      const t = term();
+      if(t == null) return null;
+      v = op === "+" ? v + t : v - t;
+      ws();
+    }
+    return v;
+  }
+  const result = expr();
+  ws();
+  if(i < s.length) return null;            // trailing junk
+  if(result == null || !isFinite(result)) return null;
+  return Math.round(result * 100) / 100;
+}
+
+/* ============================================================
+   DEVICE-TO-DEVICE TRANSFER — Phase 8
+   Split a (compressed, base64) payload into labelled chunks small
+   enough for QR / copy-paste, and reassemble them on the other side.
+   ============================================================ */
+function chunkPayload(str, maxLen = 1800){
+  const s = String(str ?? "");
+  const size = Math.max(1, maxLen | 0);
+  const total = Math.max(1, Math.ceil(s.length / size));
+  const parts = [];
+  for(let i = 0; i < total; i++){
+    parts.push(`TT${i + 1}/${total}:` + s.slice(i * size, (i + 1) * size));
+  }
+  return parts;
+}
+function reassemble(parts){
+  if(!Array.isArray(parts) || !parts.length) return null;
+  const map = new Map();
+  let total = null;
+  for(const p of parts){
+    const m = /^TT(\d+)\/(\d+):([\s\S]*)$/.exec(String(p).trim());
+    if(!m) return null;
+    const idx = +m[1], tot = +m[2];
+    if(total == null) total = tot;
+    if(tot !== total) return null;
+    map.set(idx, m[3]);
+  }
+  if(map.size !== total) return null;
+  let out = "";
+  for(let i = 1; i <= total; i++){
+    if(!map.has(i)) return null;
+    out += map.get(i);
+  }
+  return out;
+}
+
+// Merge incoming v2 trips into existing ones: match by id (merge expenses via
+// mergeExpenses + dedupe), otherwise add as a new normalized trip.
+function mergeTrips(existingTrips, incomingTrips){
+  const trips = (existingTrips||[]).map(t => ({ ...t, expenses: (t.expenses||[]).slice() }));
+  const byId = new Map(trips.map(t => [t.id, t]));
+  let addedTrips=0, addedExpenses=0, skippedExpenses=0;
+  for(const raw of (Array.isArray(incomingTrips)?incomingTrips:[])){
+    if(!raw || typeof raw!=="object") continue;
+    const existing = raw.id!=null ? byId.get(raw.id) : null;
+    if(existing){
+      const r = mergeExpenses(existing.expenses, raw.expenses||[]);
+      existing.expenses = r.merged;
+      addedExpenses += r.added; skippedExpenses += r.skipped;
+    } else {
+      const t = newTrip(raw);
+      trips.push(t); byId.set(t.id, t);
+      addedTrips++; addedExpenses += t.expenses.length;
+    }
+  }
+  return { trips, addedTrips, addedExpenses, skippedExpenses };
+}
+
+
+
+/* ---------- inlined from js/vendor/qrcode.js for file:// support ---------- */
+/* ============================================================
+   Minimal byte-mode QR Code encoder — vendored, no dependencies.
+   Versions 1–10, error-correction levels L/M/Q/H. Byte (8-bit) mode.
+   Written for TripTally (MIT). Verified module-for-module against a
+   real QR decoder (jsQR) over 240+ random inputs across all EC levels.
+
+   makeQR(text, ecl="M") -> { matrix: number[][] (1=dark/0=light), size, mask }
+   ============================================================ */
+
+// Reed–Solomon block structure per version (1..10), order L,M,Q,H.
+// Each row: [count,total,data, (count2,total2,data2)?]
+const RS = {
+  1:[[1,26,19],[1,26,16],[1,26,13],[1,26,9]],
+  2:[[1,44,34],[1,44,28],[1,44,22],[1,44,16]],
+  3:[[1,70,55],[1,70,44],[2,35,17],[2,35,13]],
+  4:[[1,100,80],[2,50,32],[2,50,24],[4,25,9]],
+  5:[[1,134,108],[2,67,43],[2,33,15,2,34,16],[2,33,11,2,34,12]],
+  6:[[2,86,68],[4,43,27],[4,43,19],[4,43,15]],
+  7:[[2,98,78],[4,49,31],[2,32,14,4,33,15],[4,39,13,1,40,14]],
+  8:[[2,121,97],[2,60,38,2,61,39],[4,40,18,2,41,19],[4,40,14,2,41,15]],
+  9:[[2,146,116],[3,58,36,2,59,37],[4,36,16,4,37,17],[4,36,12,4,37,13]],
+  10:[[2,86,68,2,87,69],[4,69,43,1,70,44],[6,43,19,2,44,20],[6,43,15,2,44,16]]
+};
+const ALIGN = {1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50]};
+const ECL = { L:1, M:0, Q:3, H:2 };     // format-info bits
+const ECIDX = { L:0, M:1, Q:2, H:3 };   // index into RS rows
+
+// GF(256), primitive polynomial 0x11d
+const EXP = new Array(256), LOG = new Array(256);
+(function(){ let x = 1; for(let i = 0; i < 255; i++){ EXP[i] = x; LOG[x] = i; x <<= 1; if(x & 0x100) x ^= 0x11d; } EXP[255] = EXP[0]; })();
+const gmul = (a, b) => (a === 0 || b === 0) ? 0 : EXP[(LOG[a] + LOG[b]) % 255];
+function rsGen(n){
+  let g = [1];
+  for(let i = 0; i < n; i++){
+    const ng = new Array(g.length + 1).fill(0);
+    for(let j = 0; j < g.length; j++){ ng[j] ^= g[j]; ng[j + 1] ^= gmul(g[j], EXP[i]); }
+    g = ng;
+  }
+  return g;
+}
+function rsEC(data, n){
+  const g = rsGen(n);
+  const res = data.concat(new Array(n).fill(0));
+  for(let i = 0; i < data.length; i++){
+    const c = res[i];
+    if(c !== 0) for(let j = 0; j < g.length; j++) res[i + j] ^= gmul(g[j], c);
+  }
+  return res.slice(data.length);
+}
+
+function blocksFor(ver, ecl){
+  const row = RS[ver][ECIDX[ecl]];
+  const out = [];
+  for(let i = 0; i < row.length; i += 3){
+    const cnt = row[i], tot = row[i + 1], dat = row[i + 2];
+    for(let k = 0; k < cnt; k++) out.push({ tot, dat, ec: tot - dat });
+  }
+  return out;
+}
+function dataCapacityBits(ver, ecl){ return blocksFor(ver, ecl).reduce((s, b) => s + b.dat, 0) * 8; }
+function cciBits(ver){ return ver <= 9 ? 8 : 16; }
+
+function encodeData(bytes, ver, ecl){
+  const bits = [];
+  const push = (val, len) => { for(let i = len - 1; i >= 0; i--) bits.push((val >> i) & 1); };
+  push(0b0100, 4);                     // byte mode
+  push(bytes.length, cciBits(ver));    // character count
+  for(const b of bytes) push(b, 8);
+  const cap = dataCapacityBits(ver, ecl);
+  const term = Math.min(4, cap - bits.length); for(let i = 0; i < term; i++) bits.push(0);
+  while(bits.length % 8 !== 0) bits.push(0);
+  const cw = [];
+  for(let i = 0; i < bits.length; i += 8){ let v = 0; for(let j = 0; j < 8; j++) v = (v << 1) | bits[i + j]; cw.push(v); }
+  const capCW = cap / 8, pads = [0xEC, 0x11]; let pi = 0;
+  while(cw.length < capCW) cw.push(pads[pi++ % 2]);
+  return cw;
+}
+function interleave(dataCW, ver, ecl){
+  const blocks = blocksFor(ver, ecl); const dblocks = [], eblocks = []; let p = 0;
+  for(const b of blocks){ const d = dataCW.slice(p, p + b.dat); p += b.dat; dblocks.push(d); eblocks.push(rsEC(d, b.ec)); }
+  const out = [];
+  const maxD = Math.max(...dblocks.map(b => b.length));
+  for(let i = 0; i < maxD; i++) for(const b of dblocks) if(i < b.length) out.push(b[i]);
+  const maxE = Math.max(...eblocks.map(b => b.length));
+  for(let i = 0; i < maxE; i++) for(const b of eblocks) if(i < b.length) out.push(b[i]);
+  return out;
+}
+
+// BCH remainder for format/version info
+function bch(data, gen, glen){
+  let d = data << (glen - 1);
+  const dlen = Math.floor(Math.log2(gen)) + 1;
+  while((Math.floor(Math.log2(d)) + 1) >= dlen) d ^= gen << ((Math.floor(Math.log2(d)) + 1) - dlen);
+  return d;
+}
+function formatBits(ecl, mask){ const data = (ECL[ecl] << 3) | mask; return ((data << 10) | bch(data, 0x537, 11)) ^ 0x5412; }
+function versionBits(ver){ return (ver << 12) | bch(ver, 0x1f25, 13); }
+
+const MASK_FNS = [
+  (r, c) => (r + c) % 2 === 0,
+  (r, _c) => r % 2 === 0,
+  (_r, c) => c % 3 === 0,
+  (r, c) => (r + c) % 3 === 0,
+  (r, c) => (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0,
+  (r, c) => ((r * c) % 2 + (r * c) % 3) === 0,
+  (r, c) => (((r * c) % 2 + (r * c) % 3) % 2) === 0,
+  (r, c) => (((r + c) % 2 + (r * c) % 3) % 2) === 0
+];
+
+function buildMatrix(ver, ecl, codewords){
+  const size = ver * 4 + 17;
+  const m = Array.from({ length: size }, () => new Array(size).fill(null));
+  const fn = Array.from({ length: size }, () => new Array(size).fill(false));
+  const setF = (r, c, v) => { m[r][c] = v ? 1 : 0; fn[r][c] = true; };
+
+  const finder = (r, c) => {
+    for(let dr = -1; dr <= 7; dr++) for(let dc = -1; dc <= 7; dc++){
+      const rr = r + dr, cc = c + dc;
+      if(rr < 0 || cc < 0 || rr >= size || cc >= size) continue;
+      const inside = dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6;
+      const ring = dr === 0 || dr === 6 || dc === 0 || dc === 6;
+      const core = dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4;
+      setF(rr, cc, inside && (ring || core));
+    }
+  };
+  finder(0, 0); finder(0, size - 7); finder(size - 7, 0);
+
+  for(let i = 8; i < size - 8; i++){ setF(6, i, i % 2 === 0); setF(i, 6, i % 2 === 0); }
+  setF(size - 8, 8, true); // dark module
+
+  const ap = ALIGN[ver];
+  for(const r of ap) for(const c of ap){
+    if((r <= 7 && c <= 7) || (r <= 7 && c >= size - 8) || (r >= size - 8 && c <= 7)) continue;
+    for(let dr = -2; dr <= 2; dr++) for(let dc = -2; dc <= 2; dc++) setF(r + dr, c + dc, Math.max(Math.abs(dr), Math.abs(dc)) !== 1);
+  }
+
+  // reserve format + version areas (so data placement skips them)
+  for(let i = 0; i < 9; i++){ if(!fn[8][i]) setF(8, i, false); if(!fn[i][8]) setF(i, 8, false); }
+  for(let i = 0; i < 8; i++){ if(!fn[8][size - 1 - i]) setF(8, size - 1 - i, false); if(!fn[size - 1 - i][8]) setF(size - 1 - i, 8, false); }
+  if(ver >= 7){ for(let i = 0; i < 6; i++) for(let j = 0; j < 3; j++){ setF(size - 11 + j, i, false); setF(i, size - 11 + j, false); } }
+
+  // place data in the up/down zig-zag, skipping the timing column
+  let bitIdx = 0; const totalBits = codewords.length * 8;
+  const getBit = () => { if(bitIdx >= totalBits) return 0; const b = (codewords[bitIdx >> 3] >> (7 - (bitIdx & 7))) & 1; bitIdx++; return b; };
+  let up = true;
+  for(let col = size - 1; col > 0; col -= 2){
+    if(col === 6) col = 5;
+    for(let i = 0; i < size; i++){
+      const row = up ? size - 1 - i : i;
+      for(let k = 0; k < 2; k++){ const c = col - k; if(m[row][c] === null && !fn[row][c]) m[row][c] = getBit(); }
+    }
+    up = !up;
+  }
+
+  const applyMaskTo = (mat, mask) => {
+    const out = mat.map(r => r.slice());
+    for(let r = 0; r < size; r++) for(let c = 0; c < size; c++) if(!fn[r][c] && out[r][c] !== null && MASK_FNS[mask](r, c)) out[r][c] ^= 1;
+    return out;
+  };
+  const setFormatAndVersion = (mat, mask) => {
+    const f = formatBits(ecl, mask);
+    for(let i = 0; i < 15; i++){ const b = (f >> i) & 1; if(i < 6) mat[i][8] = b; else if(i < 8) mat[i + 1][8] = b; else mat[size - 15 + i][8] = b; }
+    for(let i = 0; i < 15; i++){ const b = (f >> i) & 1; if(i < 8) mat[8][size - 1 - i] = b; else if(i < 9) mat[8][7] = b; else mat[8][15 - i - 1] = b; }
+    mat[size - 8][8] = 1;
+    if(ver >= 7){ const v = versionBits(ver); for(let i = 0; i < 18; i++){ const b = (v >> i) & 1; mat[Math.floor(i / 3)][i % 3 + size - 11] = b; mat[i % 3 + size - 11][Math.floor(i / 3)] = b; } }
+  };
+  const penalty = (mat) => {
+    let p = 0;
+    for(let r = 0; r < size; r++){ let run = 1; for(let c = 1; c < size; c++){ if(mat[r][c] === mat[r][c - 1]) run++; else { if(run >= 5) p += 3 + (run - 5); run = 1; } } if(run >= 5) p += 3 + (run - 5); }
+    for(let c = 0; c < size; c++){ let run = 1; for(let r = 1; r < size; r++){ if(mat[r][c] === mat[r - 1][c]) run++; else { if(run >= 5) p += 3 + (run - 5); run = 1; } } if(run >= 5) p += 3 + (run - 5); }
+    for(let r = 0; r < size - 1; r++) for(let c = 0; c < size - 1; c++){ const v = mat[r][c]; if(v === mat[r][c + 1] && v === mat[r + 1][c] && v === mat[r + 1][c + 1]) p += 3; }
+    const pat1 = [1,0,1,1,1,0,1,0,0,0,0], pat2 = [0,0,0,0,1,0,1,1,1,0,1];
+    const check = (arr) => { let s = 0; for(let i = 0; i + 11 <= arr.length; i++){ let m1 = true, m2 = true; for(let k = 0; k < 11; k++){ if(arr[i + k] !== pat1[k]) m1 = false; if(arr[i + k] !== pat2[k]) m2 = false; } if(m1 || m2) s += 40; } return s; };
+    for(let r = 0; r < size; r++) p += check(mat[r]);
+    for(let c = 0; c < size; c++){ const col = []; for(let r = 0; r < size; r++) col.push(mat[r][c]); p += check(col); }
+    let dark = 0; for(let r = 0; r < size; r++) for(let c = 0; c < size; c++) if(mat[r][c]) dark++;
+    p += Math.floor(Math.abs(dark / (size * size) * 100 - 50) / 5) * 10;
+    return p;
+  };
+
+  let best = null, bestMask = 0, bestPen = Infinity;
+  for(let mask = 0; mask < 8; mask++){
+    const mm = applyMaskTo(m, mask);
+    setFormatAndVersion(mm, mask);
+    const pen = penalty(mm);
+    if(pen < bestPen){ bestPen = pen; best = mm; bestMask = mask; }
+  }
+  return { matrix: best, size, mask: bestMask };
+}
+
+function makeQR(text, ecl = "M"){
+  const bytes = [...new TextEncoder().encode(text)];
+  let ver = null;
+  for(let v = 1; v <= 10; v++){ if(4 + cciBits(v) + 8 * bytes.length <= dataCapacityBits(v, ecl)){ ver = v; break; } }
+  if(ver == null) throw new Error("payload too long for a single QR (v1–10)");
+  return buildMatrix(ver, ecl, interleave(encodeData(bytes, ver, ecl), ver, ecl));
+}
+
+
+
+/* ---------- inlined from js/xlsx.js for file:// support ---------- */
+/* ============================================================
+   xlsx-lite — a tiny .xlsx writer (no dependencies).
+   buildXlsx(sheets) -> Uint8Array of a valid .xlsx file.
+   sheets: [{ name, rows: [[cell, ...]] }]  (cell = string | number | "" )
+   Styling is automatic: row 0 is a bold header; numeric cells get a
+   thousands/2dp number format. Stored (uncompressed) ZIP container.
+   ============================================================ */
+
+const XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+
+// strip XML-1.0-illegal control chars (keep tab/LF/CR), then escape metacharacters
+const CTRL = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
+function escapeXml(s){
+  return String(s).replace(CTRL, "").replace(/[&<>"']/g, m =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[m]));
+}
+function colLetter(n){ // 0-based -> A, B, ... Z, AA
+  let s = "";
+  n += 1;
+  while(n > 0){ const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+function isNum(v){ return typeof v === "number" && isFinite(v); }
+
+function sheetXml(rows){
+  let out = XML_HEAD +
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>';
+  rows.forEach((row, ri) => {
+    out += `<row r="${ri + 1}">`;
+    (row || []).forEach((val, ci) => {
+      if(val === "" || val == null) return;
+      const ref = colLetter(ci) + (ri + 1);
+      const header = ri === 0;
+      if(isNum(val)){
+        out += `<c r="${ref}" s="${header ? 1 : 2}"><v>${val}</v></c>`;
+      } else {
+        out += `<c r="${ref}" s="${header ? 1 : 0}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(val)}</t></is></c>`;
+      }
+    });
+    out += "</row>";
+  });
+  out += "</sheetData></worksheet>";
+  return out;
+}
+
+function stylesXml(){
+  return XML_HEAD +
+    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts>' +
+    '<fonts count="2">' +
+      '<font><sz val="11"/><name val="Calibri"/></font>' +
+      '<font><b/><sz val="11"/><name val="Calibri"/></font>' +
+    '</fonts>' +
+    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+    '<borders count="1"><border/></borders>' +
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="3">' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+      '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
+      '<xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
+    '</cellXfs>' +
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+    '</styleSheet>';
+}
+
+function buildParts(sheets){
+  const safe = sheets.map((s, i) => ({
+    name: (String(s.name || ("Sheet" + (i + 1))).replace(/[\\/?*[\]:]/g, " ").slice(0, 31)) || ("Sheet" + (i + 1)),
+    rows: s.rows || []
+  }));
+  const parts = {};
+  parts["[Content_Types].xml"] = XML_HEAD +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+    safe.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("") +
+    '</Types>';
+  parts["_rels/.rels"] = XML_HEAD +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>';
+  parts["xl/workbook.xml"] = XML_HEAD +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+    safe.map((s, i) => `<sheet name="${escapeXml(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("") +
+    '</sheets></workbook>';
+  parts["xl/_rels/workbook.xml.rels"] = XML_HEAD +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    safe.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("") +
+    `<Relationship Id="rId${safe.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+    '</Relationships>';
+  parts["xl/styles.xml"] = stylesXml();
+  safe.forEach((s, i) => { parts[`xl/worksheets/sheet${i + 1}.xml`] = sheetXml(s.rows); });
+  return parts;
+}
+
+/* ---------- minimal stored ZIP ---------- */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for(let n = 0; n < 256; n++){ let c = n; for(let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; }
+  return t;
+})();
+function crc32(bytes){
+  let c = 0xFFFFFFFF;
+  for(let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function u16(n){ return [n & 0xFF, (n >>> 8) & 0xFF]; }
+function u32(n){ return [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF]; }
+
+function buildXlsx(sheets){
+  const parts = buildParts(sheets);
+  const enc = new TextEncoder();
+  const files = Object.keys(parts).map(name => ({ name, data: enc.encode(parts[name]) }));
+
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for(const f of files){
+    const nameBytes = enc.encode(f.name);
+    const crc = crc32(f.data);
+    const local = [].concat(
+      u32(0x04034b50), u16(20), u16(0), u16(0), u16(0), u16(0),
+      u32(crc), u32(f.data.length), u32(f.data.length),
+      u16(nameBytes.length), u16(0)
+    );
+    chunks.push(new Uint8Array(local), nameBytes, f.data);
+    central.push({ name: nameBytes, crc, size: f.data.length, offset });
+    offset += local.length + nameBytes.length + f.data.length;
+  }
+  const cdStart = offset;
+  let cdSize = 0;
+  for(const c of central){
+    const hdr = [].concat(
+      u32(0x02014b50), u16(20), u16(20), u16(0), u16(0), u16(0), u16(0),
+      u32(c.crc), u32(c.size), u32(c.size),
+      u16(c.name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(c.offset)
+    );
+    chunks.push(new Uint8Array(hdr), c.name);
+    cdSize += hdr.length + c.name.length;
+  }
+  chunks.push(new Uint8Array([].concat(
+    u32(0x06054b50), u16(0), u16(0), u16(central.length), u16(central.length),
+    u32(cdSize), u32(cdStart), u16(0)
+  )));
+
+  const total = chunks.reduce((s, c) => s + c.length, 0);
+  const out = new Uint8Array(total);
+  let p = 0;
+  for(const c of chunks){ out.set(c, p); p += c.length; }
+  return out;
+}
+
+
+
+/* ---------- inlined from js/photos.js for file:// support ---------- */
+/* ============================================================
+   Photo storage — IndexedDB. Keeps image blobs OUT of localStorage
+   (and therefore out of JSON/QR exports). The expense only holds a
+   photoId; the bytes live here.
+   ============================================================ */
+const DB_NAME = "triptally";
+const STORE = "photos";
+let _dbp = null;
+
+function db(){
+  if(_dbp) return _dbp;
+  _dbp = new Promise((resolve, reject) => {
+    if(!("indexedDB" in window)){ reject(new Error("IndexedDB unavailable")); return; }
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => { const d = req.result; if(!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return _dbp;
+}
+function store(mode){ return db().then(d => d.transaction(STORE, mode).objectStore(STORE)); }
+
+async function savePhoto(id, blob){
+  const s = await store("readwrite");
+  return new Promise((res, rej) => { const r = s.put(blob, id); r.onsuccess = () => res(id); r.onerror = () => rej(r.error); });
+}
+async function loadPhoto(id){
+  if(!id) return null;
+  try{
+    const s = await store("readonly");
+    return await new Promise((res, rej) => { const r = s.get(id); r.onsuccess = () => res(r.result || null); r.onerror = () => rej(r.error); });
+  }catch{ return null; }
+}
+async function deletePhoto(id){
+  if(!id) return;
+  try{
+    const s = await store("readwrite");
+    await new Promise((res) => { const r = s.delete(id); r.onsuccess = () => res(); r.onerror = () => res(); });
+  }catch{ /* ignore */ }
+}
+
+// Delete any stored photos whose ids are no longer referenced by an expense
+// (e.g. left over from a deleted expense). Runs quietly on boot.
+async function purgeOrphans(referencedIds){
+  try{
+    const s = await store("readwrite");
+    const keys = await new Promise((res, rej) => { const r = s.getAllKeys(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); });
+    const keep = new Set(referencedIds || []);
+    for(const k of keys) if(!keep.has(k)) s.delete(k);
+  }catch{ /* ignore */ }
+}
+
+// Downscale a File/Blob to a JPEG no larger than `maxDim` on its long edge.
+async function downscaleImage(file, maxDim = 1280, quality = 0.7){
+  let width, height, source, bitmap = null;
+  try{ bitmap = await createImageBitmap(file); }catch{ bitmap = null; }
+  if(bitmap){ width = bitmap.width; height = bitmap.height; source = bitmap; }
+  else {
+    const url = URL.createObjectURL(file);
+    try{
+      source = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+      width = source.naturalWidth; height = source.naturalHeight;
+    } finally { URL.revokeObjectURL(url); }
+  }
+  const scale = Math.min(1, maxDim / Math.max(width, height));
+  const w = Math.max(1, Math.round(width * scale)), h = Math.max(1, Math.round(height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  canvas.getContext("2d").drawImage(source, 0, 0, w, h);
+  if(bitmap && bitmap.close) bitmap.close();
+  return new Promise((res) => canvas.toBlob(b => res(b), "image/jpeg", quality));
+}
+
+
+
+/* ---------- TripTally app wiring ---------- */
 
 const STORE_KEY    = "triptally.v2";
 const STORE_KEY_V1 = "triptally.v1"; // kept as a safety backup after migration
@@ -756,6 +1726,9 @@ function renderDashboard(){
   const pace = computePace(t, s, todayStr());
   if(pace) html += paceCardHTML(pace, s.base);
 
+  html += dashboardInsightHTML(s, t);
+  html += recentExpensesHTML(t, s.base);
+
   // Category breakdown (with per-category budget markers)
   if(s.cats.length){
     html += `<div class="card"><div class="section-label">Spending by category</div>`;
@@ -851,6 +1824,78 @@ function budgetCardHTML(s){
     </div>
     <div class="track ${cls}"><div class="fill" style="--w:${pct.toFixed(1)}%"></div></div>
     <div class="budget-foot">${badge}<span class="pct">${Math.round(s.pctOfBudget)}% used</span></div>
+  </div>`;
+}
+
+function dashboardInsightHTML(s, t){
+  const donut = (() => {
+    if(!s.cats.length){
+      return `<div class="insight-empty">Set exchange rates to include foreign-currency spending in charts.</div>`;
+    }
+    let cursor = 0;
+    const segments = s.cats.map(c => {
+      const start = cursor;
+      cursor += c.pct;
+      return `${c.color} ${start.toFixed(2)}% ${cursor.toFixed(2)}%`;
+    }).join(",");
+    const legend = s.cats.slice(0,4).map(c => `
+      <div class="legend-row">
+        <span class="legend-dot" style="background:${c.color}"></span>
+        <span>${esc(c.label)}</span>
+        <b>${Math.round(c.pct)}%</b>
+      </div>`).join("");
+    return `<div class="donut-wrap">
+      <div class="donut" style="background:conic-gradient(${segments})"><span>${s.cats[0].emoji}</span></div>
+      <div class="legend">${legend}</div>
+    </div>`;
+  })();
+
+  const trend = (() => {
+    if(!s.days.length) return `<div class="insight-empty">No base-currency daily trend yet.</div>`;
+    const days = s.days.slice(-7);
+    const max = Math.max(...days.map(d => d.amount), 1);
+    return `<div class="trend-bars">${days.map(d => {
+      const h = clamp(d.amount / max * 100, 8, 100);
+      const label = String(Number(d.date.slice(8,10)) || "");
+      return `<div class="trend-day" title="${esc(fmtDate(d.date))}: ${esc(fmtMoney(d.amount, s.base))}">
+        <i style="--h:${h.toFixed(1)}%"></i><span>${esc(label || fmtDate(d.date))}</span>
+      </div>`;
+    }).join("")}</div>`;
+  })();
+
+  return `<div class="card insight-card">
+    <div class="section-label">Trip indicators</div>
+    <div class="insight-grid">
+      <section class="insight-panel">
+        <div class="insight-title">Category mix</div>
+        ${donut}
+      </section>
+      <section class="insight-panel">
+        <div class="insight-title">Daily spend</div>
+        ${trend}
+      </section>
+    </div>
+  </div>`;
+}
+
+function recentExpensesHTML(t, base){
+  const recent = (t.expenses || []).slice()
+    .sort((a,b) => (a.date<b.date?1:a.date>b.date?-1:0) || ((b.createdAt||0)-(a.createdAt||0)))
+    .slice(0,3);
+  if(!recent.length) return "";
+  const rows = recent.map(e => {
+    const c = CAT_MAP[e.category] || CAT_MAP.others;
+    const cv = convert(e.amount, e.currency, t);
+    const amt = cv.converted ? `≈ ${fmtMoney(cv.value, base)}` : fmtMoney(e.amount, e.currency);
+    return `<div class="recent-row">
+      <span class="recent-ico" style="background:${c.color}22">${c.emoji}</span>
+      <span class="recent-main"><b>${esc(e.item)}</b><small>${esc(fmtDate(e.date))}${e.place ? " · " + esc(e.place) : ""}</small></span>
+      <span class="recent-amt">${esc(amt)}</span>
+    </div>`;
+  }).join("");
+  return `<div class="card recent-card">
+    <div class="section-label recent-head"><span>Recent expenses</span><button class="text-link" data-go-expenses>View all</button></div>
+    ${rows}
   </div>`;
 }
 
@@ -1297,93 +2342,80 @@ const ioEl = (ctx, role) => $(ctx + "_" + role);
 
 function ioMarkup(ctx){
   return `
-    <div class="io-label">📍 Location <span class="io-opt">optional</span></div>
+    <div class="io-label">Location <span class="io-opt">optional</span></div>
+    <input class="input" id="${ctx}_geoManual" placeholder="Place name, hotel, restaurant..." aria-label="Place name">
     <div class="io-row">
-      <button type="button" class="btn btn-soft" id="${ctx}_geoCur" style="flex:1">📍 Current</button>
-      <button type="button" class="btn btn-soft" id="${ctx}_geoFind" style="flex:1">🔎 Search</button>
-      <button type="button" class="mini" id="${ctx}_geoClear" style="display:none" aria-label="Clear location">✕</button>
-    </div>
-    <div id="${ctx}_geoBox" class="geo-box" style="display:none">
-      <input class="input" id="${ctx}_geoQ" placeholder="Search a place…" aria-label="Search a place">
-      <div id="${ctx}_geoRes" class="geo-res"></div>
+      <button type="button" class="btn btn-soft" id="${ctx}_geoCur" style="flex:1">Current</button>
+      <button type="button" class="btn btn-soft" id="${ctx}_geoFind" style="flex:1">Open Google Maps</button>
+      <button type="button" class="mini" id="${ctx}_geoClear" style="display:none" aria-label="Clear location">x</button>
     </div>
     <div class="footer-note" id="${ctx}_geoLabel" style="margin:4px 0 0"></div>
-    <div class="io-label" style="margin-top:12px">📷 Photo <span class="io-opt">optional</span></div>
+    <div class="footer-note" id="${ctx}_geoHelp" style="margin:4px 0 0">Saved locally. Google Maps opens only when you tap it.</div>
+    <div class="io-label" style="margin-top:12px">Photo <span class="io-opt">optional</span></div>
     <input type="file" id="${ctx}_camIn" accept="image/*" capture="environment" style="display:none">
     <input type="file" id="${ctx}_libIn" accept="image/*" style="display:none">
     <div class="io-row">
-      <button type="button" class="btn btn-soft" id="${ctx}_cam" style="flex:1">📷 Camera</button>
-      <button type="button" class="btn btn-soft" id="${ctx}_lib" style="flex:1">🖼️ Library</button>
-      <button type="button" class="mini" id="${ctx}_photoClear" style="display:none" aria-label="Remove photo">✕</button>
+      <button type="button" class="btn btn-soft" id="${ctx}_cam" style="flex:1">Camera</button>
+      <button type="button" class="btn btn-soft" id="${ctx}_lib" style="flex:1">Library</button>
+      <button type="button" class="mini" id="${ctx}_photoClear" style="display:none" aria-label="Remove photo">x</button>
     </div>
     <img id="${ctx}_preview" alt="" class="io-preview" style="display:none">`;
 }
 
+function readGeoPlace(ctx){
+  const input = ioEl(ctx,"geoManual");
+  return ((input && input.value) || io[ctx].place || "").trim().slice(0, 80);
+}
 function renderGeo(ctx){
-  const s = io[ctx], has = s.lat != null && s.lng != null;
-  ioEl(ctx,"geoLabel").textContent = has ? ("📍 " + (s.place || (s.lat.toFixed(4) + ", " + s.lng.toFixed(4)))) : "";
-  ioEl(ctx,"geoClear").style.display = has ? "" : "none";
+  const s = io[ctx], hasCoords = s.lat != null && s.lng != null;
+  const place = readGeoPlace(ctx);
+  s.place = place;
+  const input = ioEl(ctx,"geoManual");
+  if(input && input.value !== place) input.value = place;
+  const label = hasCoords
+    ? (place ? place + " - " + s.lat.toFixed(4) + ", " + s.lng.toFixed(4) : s.lat.toFixed(4) + ", " + s.lng.toFixed(4))
+    : place;
+  ioEl(ctx,"geoLabel").textContent = label ? ("Saved locally: " + label) : "";
+  ioEl(ctx,"geoClear").style.display = (hasCoords || place) ? "" : "none";
 }
 function setGeo(ctx, lat, lng, place){
   io[ctx].lat = Math.round(Number(lat) * 1e6) / 1e6;
   io[ctx].lng = Math.round(Number(lng) * 1e6) / 1e6;
-  io[ctx].place = place || "";
+  io[ctx].place = place || readGeoPlace(ctx);
   renderGeo(ctx);
 }
-function clearGeo(ctx){ io[ctx].lat = null; io[ctx].lng = null; io[ctx].place = ""; ioEl(ctx,"geoBox").style.display = "none"; renderGeo(ctx); }
+function clearGeo(ctx){
+  io[ctx].lat = null; io[ctx].lng = null; io[ctx].place = "";
+  const input = ioEl(ctx,"geoManual"); if(input) input.value = "";
+  renderGeo(ctx);
+}
+function geoPermissionHelp(err){
+  if(!window.isSecureContext) return "Location needs HTTPS or an installed app. Open the hosted TripTally link or add it to Home Screen.";
+  if(err && err.code === 1) return "Location is blocked. On iPhone, check Settings > Privacy & Security > Location Services > Safari Websites, then reopen TripTally.";
+  if(err && err.code === 2) return "Could not determine location. You can still type the place name locally.";
+  if(err && err.code === 3) return "Location timed out. You can still type the place name locally.";
+  return "Could not get your location. You can still type the place name locally.";
+}
 function geoCurrent(ctx){
   if(!navigator.geolocation){ toast("Location isn't available here"); return; }
-  const btn = ioEl(ctx,"geoCur"); btn.disabled = true; btn.textContent = "…";
-  navigator.geolocation.getCurrentPosition(async (pos) => {
-    setGeo(ctx, pos.coords.latitude, pos.coords.longitude, ""); haptic();
-    btn.disabled = false; btn.textContent = "📍 Current";
-    if(navigator.onLine){ const name = await reverseGeocode(io[ctx].lat, io[ctx].lng); if(name){ io[ctx].place = name; renderGeo(ctx); } }
+  if(!window.isSecureContext){ toast(geoPermissionHelp()); return; }
+  const btn = ioEl(ctx,"geoCur"); btn.disabled = true; btn.textContent = "...";
+  navigator.geolocation.getCurrentPosition((pos) => {
+    setGeo(ctx, pos.coords.latitude, pos.coords.longitude, readGeoPlace(ctx)); haptic();
+    btn.disabled = false; btn.textContent = "Current";
   }, (err) => {
-    btn.disabled = false; btn.textContent = "📍 Current";
-    toast(err && err.code === 1 ? "Location permission denied" : "Couldn't get your location");
+    btn.disabled = false; btn.textContent = "Current";
+    const msg = geoPermissionHelp(err);
+    const help = ioEl(ctx,"geoHelp"); if(help) help.textContent = msg;
+    toast(msg);
   }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
 }
-function toggleGeoSearch(ctx){
-  const box = ioEl(ctx,"geoBox");
-  const open = box.style.display === "none";
-  box.style.display = open ? "block" : "none";
-  if(open) ioEl(ctx,"geoQ").focus();
-}
-async function runGeoSearch(ctx){
-  const q = ioEl(ctx,"geoQ").value.trim();
-  const res = ioEl(ctx,"geoRes");
-  if(!q){ res.innerHTML = ""; return; }
-  if(!navigator.onLine){ toast("Place search needs a connection"); return; }
-  res.innerHTML = `<div class="footer-note">Searching…</div>`;
-  try{
-    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(q)}`;
-    const r = await fetch(url, { headers: { Accept: "application/json" } });
-    const data = await r.json();
-    if(!Array.isArray(data) || !data.length){ res.innerHTML = `<div class="footer-note">No places found</div>`; return; }
-    res._results = data;
-    res.innerHTML = data.map((d, i) => `<button type="button" class="geo-item" data-i="${i}">${esc(d.display_name)}</button>`).join("");
-  }catch(e){ console.warn("geo search", e); res.innerHTML = `<div class="footer-note">Search failed</div>`; }
-}
-function pickGeoResult(ctx, idx){
-  const res = ioEl(ctx,"geoRes"), d = res._results && res._results[idx];
-  if(!d) return;
-  const name = (d.display_name || "").split(",").slice(0, 2).join(",").trim().slice(0, 80);
-  setGeo(ctx, d.lat, d.lon, name);
-  ioEl(ctx,"geoBox").style.display = "none";
-}
-async function reverseGeocode(lat, lng){
-  try{
-    const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&zoom=14&addressdetails=1`;
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    if(!res.ok) return "";
-    const d = await res.json();
-    const a = d.address || {};
-    const local = a.neighbourhood || a.suburb || a.quarter || a.hamlet || a.village || a.town || a.city_district;
-    const city = a.city || a.town || a.county;
-    const parts = [...new Set([local, city, a.country].filter(Boolean))].slice(0, 2);
-    const label = parts.length ? parts.join(", ") : (d.display_name || "").split(",").slice(0, 2).join(",").trim();
-    return (label || "").slice(0, 80);
-  }catch{ return ""; }
+function openGeoMap(ctx){
+  io[ctx].place = readGeoPlace(ctx);
+  renderGeo(ctx);
+  const url = geoMapUrl(io[ctx].lat, io[ctx].lng, io[ctx].place);
+  if(!url){ toast("Type a place or use Current first"); return; }
+  window.open(url, "_blank", "noopener");
 }
 function renderPhoto(ctx){
   const s = io[ctx], img = ioEl(ctx,"preview");
@@ -1406,14 +2438,17 @@ function resetIO(ctx, expense){
     place: (expense && expense.place) || "",
     blob: null, photoId: (expense && expense.photoId) || null, cleared: false
   };
-  const box = ioEl(ctx,"geoBox");
-  if(box){ box.style.display = "none"; ioEl(ctx,"geoRes").innerHTML = ""; ioEl(ctx,"geoQ").value = ""; }
+  const manual = ioEl(ctx,"geoManual");
+  if(manual) manual.value = io[ctx].place || "";
   renderGeo(ctx); renderPhoto(ctx);
 }
 async function applyIO(ctx, target){
   const s = io[ctx];
-  if(s.lat != null && s.lng != null){ target.lat = s.lat; target.lng = s.lng; if(s.place) target.place = s.place; else delete target.place; }
-  else { delete target.lat; delete target.lng; delete target.place; }
+  s.place = readGeoPlace(ctx);
+  if(s.lat != null && s.lng != null){ target.lat = s.lat; target.lng = s.lng; }
+  else { delete target.lat; delete target.lng; }
+  if(s.place) target.place = s.place;
+  else delete target.place;
   if(s.blob){
     const pid = target.photoId || (uid() + "img");
     try{ await savePhoto(pid, s.blob); target.photoId = pid; }
@@ -1422,11 +2457,23 @@ async function applyIO(ctx, target){
 }
 function wireIO(ctx){
   $(ctx + "_io").innerHTML = ioMarkup(ctx);
+  ioEl(ctx,"geoFind").textContent = "Open Google Maps";
+  const label = ioEl(ctx,"geoLabel");
+  if(label && !ioEl(ctx,"geoHelp")){
+    const help = document.createElement("div");
+    help.className = "footer-note";
+    help.id = ctx + "_geoHelp";
+    help.style.margin = "4px 0 0";
+    help.textContent = "Saved locally. Google Maps opens only when you tap it.";
+    label.insertAdjacentElement("afterend", help);
+  }
+  ioEl(ctx,"geoManual").addEventListener("input", () => {
+    io[ctx].place = readGeoPlace(ctx);
+    renderGeo(ctx);
+  });
   ioEl(ctx,"geoCur").addEventListener("click", () => geoCurrent(ctx));
-  ioEl(ctx,"geoFind").addEventListener("click", () => toggleGeoSearch(ctx));
+  ioEl(ctx,"geoFind").addEventListener("click", () => openGeoMap(ctx));
   ioEl(ctx,"geoClear").addEventListener("click", () => clearGeo(ctx));
-  ioEl(ctx,"geoQ").addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); runGeoSearch(ctx); } });
-  ioEl(ctx,"geoRes").addEventListener("click", e => { const b = e.target.closest("[data-i]"); if(b) pickGeoResult(ctx, +b.dataset.i); });
   ioEl(ctx,"cam").addEventListener("click", () => ioEl(ctx,"camIn").click());
   ioEl(ctx,"lib").addEventListener("click", () => ioEl(ctx,"libIn").click());
   ioEl(ctx,"camIn").addEventListener("change", e => { ioPhotoPicked(ctx, e.target.files[0]); e.target.value = ""; });
@@ -1968,6 +3015,9 @@ function init(){
 
   // tabs
   document.querySelectorAll(".tab").forEach(b=> b.addEventListener("click", ()=>setTab(b.dataset.tab)));
+  $("dashboardBody").addEventListener("click", e=>{
+    if(e.target.closest("[data-go-expenses]")) setTab("expenses");
+  });
 
   // theme
   $("themeBtn").addEventListener("click", ()=>{
@@ -2033,7 +3083,12 @@ function init(){
     const ed = e.target.closest("[data-edit]");
     const dl = e.target.closest("[data-del]");
     const rp = e.target.closest("[data-repeat]");
-    if(mp){ const x = state.expenses.find(z=>z.id===mp.dataset.map); if(x && x.lat!=null) window.open(geoMapUrl(x.lat, x.lng), "_blank", "noopener"); return; }
+    if(mp){
+      const x = state.expenses.find(z=>z.id===mp.dataset.map);
+      const url = x ? geoMapUrl(x.lat, x.lng, x.place) : "";
+      if(url) window.open(url, "_blank", "noopener");
+      return;
+    }
     if(ph){ openPhotoViewer(ph.dataset.pid); return; }
     if(rp){ repeatExpense(rp.dataset.repeat); return; }
     if(ed){ const x = state.expenses.find(z=>z.id===ed.dataset.edit); if(x) openSheet(x); return; }
@@ -2148,6 +3203,33 @@ function init(){
 const _st = document.createElement("style");
 _st.textContent = `
 @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+.insight-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.insight-panel{min-width:0;background:var(--card-2);border:1px solid var(--line);border-radius:16px;padding:12px}
+.insight-title{font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px}
+.donut-wrap{display:flex;align-items:center;gap:12px;min-height:116px}
+.donut{width:96px;height:96px;border-radius:50%;display:grid;place-items:center;position:relative;flex:none;box-shadow:inset 0 0 0 1px rgba(0,0,0,.04)}
+.donut::after{content:"";position:absolute;inset:24px;border-radius:50%;background:var(--card-2);box-shadow:0 0 0 1px var(--line)}
+.donut span{position:relative;z-index:1;font-size:22px}
+.legend{display:flex;flex-direction:column;gap:6px;min-width:0;flex:1}
+.legend-row{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:7px;font-size:12px;color:var(--muted);font-weight:650;min-width:0}
+.legend-row span:nth-child(2){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.legend-row b{color:var(--ink);font-size:12px}
+.legend-dot{width:9px;height:9px;border-radius:999px}
+.trend-bars{height:116px;display:grid;grid-template-columns:repeat(7,minmax(16px,1fr));align-items:end;gap:6px}
+.trend-day{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:5px;min-width:0}
+.trend-day i{width:100%;max-width:22px;height:var(--h);min-height:8px;border-radius:999px 999px 5px 5px;background:linear-gradient(180deg,var(--brand),var(--accent));display:block}
+.trend-day span{font-size:10px;color:var(--faint);font-weight:700;white-space:nowrap}
+.insight-empty{min-height:116px;display:grid;place-items:center;text-align:center;color:var(--muted);font-size:12.5px;font-weight:650;line-height:1.35}
+.recent-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.text-link{font-size:12px;font-weight:850;color:var(--brand);padding:4px 0}
+.recent-row{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-2)}
+.recent-row:last-child{border-bottom:none;padding-bottom:0}
+.recent-ico{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;font-size:16px}
+.recent-main{min-width:0;display:flex;flex-direction:column}
+.recent-main b{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.recent-main small{font-size:11.5px;color:var(--muted);font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.recent-amt{font-size:13.5px;font-weight:850;white-space:nowrap}
+@media (max-width:430px){.insight-grid{grid-template-columns:1fr}.donut-wrap{min-height:auto}.trend-bars{height:104px}}
 .trip-list{display:flex;flex-direction:column;gap:10px;margin-top:10px}
 .trip-card{display:flex;align-items:stretch;gap:8px;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:var(--card-2);overflow:hidden;transition:border-color .15s,background .15s}
 .trip-card.active{border-color:var(--brand);background:var(--brand-soft)}

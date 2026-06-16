@@ -74,8 +74,9 @@ TripTally is built so that your spending data never leaves your device:
 
 - All trip and expense data is kept in `localStorage` under the key `triptally.v2` (an older `triptally.v1` key is preserved as a one-time migration backup).
 - There is no backend, no analytics, and no third-party scripts loaded at runtime.
-- **Location** is opt-in per expense. GPS capture happens on-device; the only network call is the optional reverse-geocode (coordinates → place name) via the free Nominatim API, and only when you tap to add a location while online.
+- **Location** is opt-in per expense. Typed place names and GPS coordinates are stored locally with the expense; TripTally does not reverse-geocode or upload coordinates automatically. Google Maps opens only when you explicitly tap a map/search action.
 - **Photos** are downscaled and stored in your browser's IndexedDB on this device only — they are never included in JSON/QR exports and never uploaded.
+- **Offline files** are kept in the browser's service-worker cache so the app shell can load without a network connection. TripTally does not use cookies for trip data.
 - The only way data leaves your device is if **you** explicitly export it (JSON/CSV/Excel) or share the text summary.
 
 Clearing your browser data for this site will erase your trip, so keep backups (below).
@@ -96,7 +97,7 @@ A good habit: export a fresh JSON backup at the end of each travel day.
 
 ## Development
 
-TripTally is intentionally a **single self-contained file**: `index.html` contains all of the CSS (in a `<style>` block), the markup, and the application logic (one vanilla-JS `<script>` block — no frameworks, no build step, no runtime dependencies).
+TripTally is intentionally shipped as a **single self-contained file**: `index.html` contains the CSS, markup, and runtime application logic, so it can still be opened directly from your files. There are no frameworks, no build step, and no runtime dependencies.
 
 To work on it:
 
@@ -109,7 +110,7 @@ To work on it:
    # then visit http://localhost:8000
    ```
 
-The pure, DOM-free logic (stats, normalization, import merge, summary text) lives in [`js/core.js`](js/core.js) as an ES module so it can be unit-tested. `index.html` imports it (`<script type="module">`); the shipped app still needs **no build step**.
+The pure, DOM-free logic (stats, normalization, import merge, summary text) is mirrored in [`js/core.js`](js/core.js) as an ES module so it can be unit-tested. The shipped `index.html` has the runtime code inlined to support double-click / `file://` use as well as hosted/PWA use.
 
 Key things to know are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the state shape, the main render functions, the storage key, and current limitations.
 

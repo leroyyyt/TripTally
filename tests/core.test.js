@@ -532,6 +532,12 @@ describe("normalizeExpense location + photo (new)", () => {
     expect(e.lng).toBe(139.7);
     expect(e.place).toBe("Shibuya, Tokyo");
   });
+  it("keeps a typed place even without coordinates", () => {
+    const e = normalizeExpense({ item:"x", amount:5, place:"Museum cafe" });
+    expect(e.lat).toBeUndefined();
+    expect(e.lng).toBeUndefined();
+    expect(e.place).toBe("Museum cafe");
+  });
   it("drops out-of-range or non-numeric coordinates", () => {
     expect(normalizeExpense({ item:"x", amount:5, lat:200, lng:10 }).lat).toBeUndefined();
     expect(normalizeExpense({ item:"x", amount:5, lat:"abc", lng:"def" }).lat).toBeUndefined();
@@ -543,9 +549,12 @@ describe("normalizeExpense location + photo (new)", () => {
 });
 
 describe("geoMapUrl", () => {
-  it("builds an OpenStreetMap link", () => {
-    expect(geoMapUrl(35.66, 139.7)).toContain("openstreetmap.org");
-    expect(geoMapUrl(35.66, 139.7)).toContain("mlat=35.66");
+  it("builds a Google Maps link for coordinates", () => {
+    expect(geoMapUrl(35.66, 139.7)).toContain("google.com/maps/search");
+    expect(geoMapUrl(35.66, 139.7)).toContain("35.66%2C139.7");
+  });
+  it("builds a Google Maps search link for place-only locations", () => {
+    expect(geoMapUrl(null, null, "Shibuya Crossing")).toContain("query=Shibuya%20Crossing");
   });
   it("returns empty for bad input", () => {
     expect(geoMapUrl(NaN, 1)).toBe("");

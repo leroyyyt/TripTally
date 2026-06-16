@@ -1,7 +1,7 @@
 /* TripTally service worker — cache-first, version-stamped.
    Bump CACHE on every release that changes index.html or assets
    (see README → "Releasing / bumping the cache version"). */
-const CACHE = "triptally-v12";
+const CACHE = "triptally-v14";
 
 const ASSETS = [
   "./",
